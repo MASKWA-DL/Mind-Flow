@@ -24,6 +24,10 @@ public class FocusSession {
     public int selfFocusScore;       // 自评专注度(1-5)
     public int selfFatigueScore;     // 自评疲劳度(1-5)
     public boolean isActive;         // 会话是否进行中
-    
+
+    // === 新增：专属 AI 分析报告 ===
+    public String aiReport;
+
+    public int distractionTimeSec;
     public FocusSession() {}
 }
