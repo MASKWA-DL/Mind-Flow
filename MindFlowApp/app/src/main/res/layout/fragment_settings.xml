@@ -171,6 +171,49 @@
                         android:layout_height="wrap_content" />
                 </LinearLayout>
 
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginStart="16dp"
+                    android:background="@color/background_secondary" />
+
+                <LinearLayout
+                    android:id="@+id/settingNotificationAccess"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:padding="16dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:background="?attr/selectableItemBackground">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="通知访问权限"
+                            android:textColor="@color/text_primary"
+                            android:textSize="16sp" />
+
+                        <TextView
+                            android:id="@+id/tvNotificationAccessStatus"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="未授权（用于专注时按来源屏蔽普通通知）"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="14sp" />
+                    </LinearLayout>
+
+                    <com.google.android.material.switchmaterial.SwitchMaterial
+                        android:id="@+id/switchNotificationAccess"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content" />
+                </LinearLayout>
+
             </LinearLayout>
         </androidx.cardview.widget.CardView>
 
@@ -209,6 +252,54 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="设置专注时允许使用的应用"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="14sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text=">"
+                    android:textColor="@color/text_hint"
+                    android:textSize="18sp" />
+            </LinearLayout>
+        </androidx.cardview.widget.CardView>
+
+        <androidx.cardview.widget.CardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="24dp"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="2dp"
+            app:cardBackgroundColor="@color/card_background">
+
+            <LinearLayout
+                android:id="@+id/settingNotificationSources"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:padding="16dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="?attr/selectableItemBackground">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="通知允许来源"
+                        android:textColor="@color/text_primary"
+                        android:textSize="16sp" />
+
+                    <TextView
+                        android:id="@+id/tvNotificationSourcesStatus"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="配置专注期间仍允许通知的应用"
                         android:textColor="@color/text_secondary"
                         android:textSize="14sp" />
                 </LinearLayout>

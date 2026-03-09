@@ -30,6 +30,8 @@ import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 import com.example.mindflow.MainActivity;
 import com.example.mindflow.R;
 import com.example.mindflow.network.GlmApiService;
+import com.example.mindflow.utils.FocusModePreferences;
+import com.example.mindflow.utils.PermissionHelper;
 import com.example.mindflow.utils.ScreenCaptureDataHolder;
 import com.example.mindflow.utils.ScreenCaptureManager;
 
@@ -42,7 +44,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * 核心专注服务 - 整合计时、屏幕监控、分心检测
- * 
+ *
  * 功能：
  * 1. 前台服务保活
  * 2. 番茄钟计时
@@ -52,56 +54,67 @@ import java.util.concurrent.TimeUnit;
  */
 public class FocusService extends Service {
     private static final String TAG = "FocusService";
-    
+
     // 通知相关
     private static final String CHANNEL_ID = "MindFlow_Focus_Channel";
     private static final String CHANNEL_LOCK_ID = "MindFlow_Lock_Channel";
     private static final int NOTIFICATION_ID = 1001;
-    
+
     // 广播 Action
     public static final String ACTION_TIMER_TICK = "com.example.mindflow.TIMER_TICK";
     public static final String ACTION_FOCUS_STATE_CHANGED = "com.example.mindflow.FOCUS_STATE_CHANGED";
     public static final String ACTION_AI_RESULT = "com.example.mindflow.AI_RESULT";
     public static final String ACTION_WARNING = "com.example.mindflow.WARNING";
-    
+
     // 状态
     public enum FocusState {
         IDLE, FOCUSING, PAUSED, RESTING
     }
-    
+
     private FocusState currentState = FocusState.IDLE;
     private long focusDurationMs = 25 * 60 * 1000L; // 默认25分钟
     private long remainingMs = 0;
     private long focusStartTime = 0;
-    
+
     // 分心检测
     private DistractionManager distractionManager;
     private String currentAiVision = "未知";
     private String currentForegroundApp = "";
     private String focusGoal = "工作"; // 用户的专注目标
-    
-    // 白名单
+
+    // 白名单：whitelist 仅包含系统/用户显式允许的应用；goalRelevantApps 是任务相关但仍需 AI 判定内容的应用
     private Set<String> whitelist = new HashSet<>();
-    
+    private final Set<String> goalRelevantApps = new HashSet<>();
+
+    private static final long APP_SWITCH_GRACE_MS = 2500L;
+    private static final long MIN_TEXT_ANALYSIS_INTERVAL_MS = 8000L;
+    private static final long SAME_TEXT_ANALYSIS_COOLDOWN_MS = 20000L;
+    private static final int MIN_SCREEN_TEXT_LENGTH = 12;
+    private long lastForegroundSwitchTime = 0;
+    private long lastTextAnalysisAt = 0;
+    private String lastTextAnalysisKey = "";
+    private boolean isTextAnalysisInFlight = false;
+    private boolean isImageAnalysisInFlight = false;
+
     // 锁机使用LockScreenActivity实现
-    
+
     // 线程调度
     private final ScheduledExecutorService executor = Executors.newScheduledThreadPool(3);
     private ScheduledFuture<?> timerTask;
     private ScheduledFuture<?> screenAnalysisTask;
     private ScheduledFuture<?> watchdogTask;  // 守护任务
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
-    
+
     // 守护机制相关
     private long lastTimerTickTime = 0;  // 上次计时器心跳时间
     private long lastAnalysisTime = 0;   // 上次分析时间
     private int watchdogRestartCount = 0; // 重启次数
-    
+
     // 屏幕捕获
     private MediaProjection mediaProjection;
     private boolean isScreenCaptureActive = false;
     private String screenCaptureStatus = "未启动";
-    
+
     // MediaProjection 回调 - 监听断开
     private final MediaProjection.Callback mediaProjectionCallback = new MediaProjection.Callback() {
         @Override
@@ -112,16 +125,16 @@ public class FocusService extends Service {
             mainHandler.post(() -> broadcastScreenCaptureStatus());
         }
     };
-    
+
     // Binder
     private final IBinder binder = new FocusBinder();
-    
+
     public class FocusBinder extends Binder {
         public FocusService getService() {
             return FocusService.this;
         }
     }
-    
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -135,7 +148,7 @@ public class FocusService extends Service {
         registerLockAndScreenReceivers();
         Log.d(TAG, "FocusService 创建");
     }
-    
+
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null) {
@@ -158,12 +171,12 @@ public class FocusService extends Service {
         }
         return START_STICKY;
     }
-    
+
     @Override
     public IBinder onBind(Intent intent) {
         return binder;
     }
-    
+
     @Override
     public void onDestroy() {
         super.onDestroy();
@@ -173,7 +186,7 @@ public class FocusService extends Service {
         executor.shutdownNow();
         Log.d(TAG, "FocusService 销毁");
     }
-    
+
     /**
      * 当用户从最近任务划掉App时触发 - 自恢复机制
      */
@@ -181,15 +194,15 @@ public class FocusService extends Service {
     public void onTaskRemoved(Intent rootIntent) {
         super.onTaskRemoved(rootIntent);
         Log.w(TAG, "🚨 App被从最近任务移除，尝试自恢复...");
-        
+
         // 如果正在专注中，需要自恢复
         if (currentState == FocusState.FOCUSING) {
             // 保存当前状态到SharedPreferences
             saveServiceState();
-            
+
             // 使用AlarmManager在短延时后重启服务
             scheduleServiceRestart();
-            
+
             // 立即尝试拉回锁机界面（如果锁机激活中）
             AppMonitorService monitorService = AppMonitorService.getInstance();
             if (monitorService != null && monitorService.isLockScreenActive()) {
@@ -198,7 +211,7 @@ public class FocusService extends Service {
             }
         }
     }
-    
+
     /**
      * 保存服务状态用于恢复
      */
@@ -213,7 +226,7 @@ public class FocusService extends Service {
             .apply();
         Log.d(TAG, "服务状态已保存: state=" + currentState + ", remaining=" + remainingMs);
     }
-    
+
     /**
      * 恢复服务状态
      */
@@ -221,35 +234,35 @@ public class FocusService extends Service {
         SharedPreferences prefs = getSharedPreferences("FocusServiceState", MODE_PRIVATE);
         String stateStr = prefs.getString("state", "IDLE");
         long savedTime = prefs.getLong("save_time", 0);
-        
+
         // 只有在5分钟内保存的状态才恢复
         if (System.currentTimeMillis() - savedTime > 5 * 60 * 1000) {
             Log.d(TAG, "保存的状态已过期，不恢复");
             clearSavedState();
             return;
         }
-        
+
         if ("FOCUSING".equals(stateStr)) {
             long remainingMs = prefs.getLong("remaining_ms", 0);
             long elapsed = System.currentTimeMillis() - savedTime;
             remainingMs = Math.max(0, remainingMs - elapsed);
-            
+
             if (remainingMs > 0) {
                 this.focusDurationMs = prefs.getLong("focus_duration_ms", 25 * 60 * 1000L);
                 this.focusGoal = prefs.getString("focus_goal", "工作");
-                
+
                 Log.w(TAG, "🔄 恢复专注会话: remaining=" + remainingMs + "ms");
                 startFocusSession(remainingMs);
             }
         }
         clearSavedState();
     }
-    
+
     private void clearSavedState() {
         getSharedPreferences("FocusServiceState", MODE_PRIVATE)
             .edit().clear().apply();
     }
-    
+
     /**
      * 使用AlarmManager调度服务重启
      */
@@ -257,14 +270,14 @@ public class FocusService extends Service {
         android.app.AlarmManager alarmManager = (android.app.AlarmManager) getSystemService(Context.ALARM_SERVICE);
         Intent restartIntent = new Intent(this, FocusService.class);
         restartIntent.setAction("RESTART_FROM_TASK_REMOVED");
-        
+
         PendingIntent pendingIntent = PendingIntent.getService(
-            this, 
-            9999, 
-            restartIntent, 
+            this,
+            9999,
+            restartIntent,
             PendingIntent.FLAG_ONE_SHOT | PendingIntent.FLAG_IMMUTABLE
         );
-        
+
         // 500ms后重启
         long triggerTime = System.currentTimeMillis() + 500;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -274,9 +287,9 @@ public class FocusService extends Service {
         }
         Log.d(TAG, "已调度服务重启");
     }
-    
+
     // ==================== 专注会话控制 ====================
-    
+
     /**
      * 设置专注目标
      */
@@ -284,10 +297,14 @@ public class FocusService extends Service {
         if (goal != null && !goal.trim().isEmpty()) {
             this.focusGoal = goal.trim();
             GlmApiService.setFocusGoal(this.focusGoal);
+            rebuildGoalRelevantApps();
+            if (distractionManager != null) {
+                distractionManager.setWhitelist(getEffectiveWhitelist());
+            }
             Log.d(TAG, "专注目标设置为: " + this.focusGoal);
         }
     }
-    
+
     public String getFocusGoal() {
         return focusGoal;
     }
@@ -297,78 +314,81 @@ public class FocusService extends Service {
             Log.w(TAG, "已在专注中，忽略重复启动");
             return;
         }
-        
+
         // 确保 AI 服务知道当前目标
         GlmApiService.setFocusGoal(focusGoal);
-        
-        // 根据专注目标智能添加白名单
-        addSmartWhitelist(focusGoal);
-        
+
+        rebuildGoalRelevantApps();
+        resetAnalysisState();
+
         this.focusDurationMs = durationMs;
         this.remainingMs = durationMs;
         this.focusStartTime = System.currentTimeMillis();
         this.currentState = FocusState.FOCUSING;
-        
+
         // 重置分心管理器并设置会话ID
         distractionManager.reset();
         distractionManager.enableMonitoring();  // 启用监控
         String sessionId = "session_" + System.currentTimeMillis();
         distractionManager.setSessionId(sessionId);
-        
+
         // 传递白名单给DistractionManager（锁机时用）
-        distractionManager.setWhitelist(whitelist);
-        
+        distractionManager.setWhitelist(getEffectiveWhitelist());
+
         // 【重要】重置AI请求取消状态
         GlmApiService.resetCancelState();
-        
-        
-        // 自动开启勿扰模式（减少heads-up通知干扰）
-        if (com.example.mindflow.utils.PermissionHelper.enableDndMode(this)) {
+
+        FocusModePreferences.setFocusModeActive(this, true);
+        FocusModePreferences.resetBlockedNotificationCount(this);
+
+        // 没有通知访问权限时，退化到勿扰模式兜底。
+        if (!PermissionHelper.hasNotificationListenerPermission(this)
+                && PermissionHelper.enableDndMode(this)) {
             Log.i(TAG, "🔕 已自动开启勿扰模式");
         }
-        
+
         // 启动前台服务
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, createFocusNotification(), 
+            startForeground(NOTIFICATION_ID, createFocusNotification(),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
         } else {
             startForeground(NOTIFICATION_ID, createFocusNotification());
         }
-        
+
         // 先取消之前可能存在的任务（防止2倍速）
         if (timerTask != null) timerTask.cancel(false);
         if (screenAnalysisTask != null) screenAnalysisTask.cancel(false);
         if (watchdogTask != null) watchdogTask.cancel(false);
-        
+
         // 启动计时器（每秒更新）
         timerTask = executor.scheduleAtFixedRate(this::safeTimerTick, 0, 1, TimeUnit.SECONDS);
-        
+
         // 启动屏幕分析（延迟5秒后开始，每15秒分析一次）
         // 与分心提醒频率同步
         screenAnalysisTask = executor.scheduleAtFixedRate(this::safeAnalyzeScreen, 5, 15, TimeUnit.SECONDS);
-        
+
         // 启动守护任务（每5秒检查一次）
         watchdogTask = executor.scheduleAtFixedRate(this::watchdogCheck, 5, 5, TimeUnit.SECONDS);
-        
+
         broadcastStateChange();
-        
+
         // 立即广播初始 AI 状态
         broadcastInitialAiStatus();
-        
+
         Log.i(TAG, "专注会话开始，时长: " + (durationMs / 60000) + " 分钟，目标: " + focusGoal);
     }
-    
+
     public void stopFocusSession() {
         if (currentState == FocusState.IDLE) return;
-        
+
         // 【重要】立即设置状态为IDLE，阻止所有后续处理
         currentState = FocusState.IDLE;
         Log.i(TAG, "🛑 开始停止专注会话...");
-        
+
         // 【重要】取消所有正在进行的AI请求
         GlmApiService.cancelAllRequests();
         Log.i(TAG, "🛑 已取消所有AI请求");
-        
+
         // 停止任务（优先停止，防止继续触发AI分析）
         if (timerTask != null) {
             timerTask.cancel(true);  // 使用true强制中断
@@ -382,11 +402,11 @@ public class FocusService extends Service {
             watchdogTask.cancel(true);
             watchdogTask = null;
         }
-        
+
         // 结束锁机（悬浮窗和Activity都关闭）
         hideLockScreen();
         Log.i(TAG, "🔓 锁机已结束");
-        
+
         // 关闭锁机
         AppMonitorService service = AppMonitorService.getInstance();
         if (service != null) {
@@ -395,42 +415,48 @@ public class FocusService extends Service {
             service.resetDistractionCount();
             Log.i(TAG, "� 锁机已关闭");
         }
-        
+
         // 完全停止并重置DistractionManager（防止继续触发锁机）
         if (distractionManager != null) {
             distractionManager.stopAndReset();
             distractionManager.clearLockScreenCache();  // 清空锁机分心缓存
             Log.i(TAG, "🛑 DistractionManager已完全停止，分心缓存已清空");
         }
-        
+
+        FocusModePreferences.setFocusModeActive(this, false);
+
         // 取消所有通知（包括锁机警告通知）
         NotificationManagerCompat notificationManager = NotificationManagerCompat.from(this);
         notificationManager.cancelAll();
         Log.i(TAG, "🔕 所有通知已取消");
-        
+
         // 关闭勿扰模式
-        if (com.example.mindflow.utils.PermissionHelper.disableDndMode(this)) {
+        if (PermissionHelper.disableDndMode(this)) {
             Log.i(TAG, "🔔 已关闭勿扰模式");
         }
-        
+
         // 停止屏幕捕获
         stopScreenCapture();
-        
+
         // 清除当前会话的实时数据
         SharedPreferences prefs = getSharedPreferences("MindFlowPrefs", MODE_PRIVATE);
         prefs.edit()
             .remove("current_session_minutes")
             .remove("current_distractions")
+            .remove("current_blocked_notifications")
             .remove("current_distraction_history")
             .apply();
-        
+
         // 停止前台服务
         stopForeground(true);
-        
+
+        goalRelevantApps.clear();
+        resetAnalysisState();
+
         broadcastStateChange();
         Log.i(TAG, "✅ 专注会话已完全停止");
     }
-    
+
     public void pauseFocusSession() {
         if (currentState != FocusState.FOCUSING) return;
         currentState = FocusState.PAUSED;
@@ -438,7 +464,7 @@ public class FocusService extends Service {
         if (screenAnalysisTask != null) screenAnalysisTask.cancel(false);
         broadcastStateChange();
     }
-    
+
     public void resumeFocusSession() {
         if (currentState != FocusState.PAUSED) return;
         currentState = FocusState.FOCUSING;
@@ -448,9 +474,9 @@ public class FocusService extends Service {
         watchdogTask = executor.scheduleAtFixedRate(this::watchdogCheck, 5, 5, TimeUnit.SECONDS);
         broadcastStateChange();
     }
-    
+
     // ==================== 守护机制 ====================
-    
+
     /**
      * 安全包装的计时器任务
      */
@@ -462,7 +488,7 @@ public class FocusService extends Service {
             Log.e(TAG, "计时器任务异常: " + e.getMessage(), e);
         }
     }
-    
+
     /**
      * 安全包装的屏幕分析任务
      */
@@ -479,30 +505,30 @@ public class FocusService extends Service {
             Log.e(TAG, "屏幕分析任务异常: " + e.getMessage(), e);
         }
     }
-    
+
     /**
      * 守护检查 - 检测任务是否异常停止并自动恢复
      * 更积极的保活策略
      */
     private void watchdogCheck() {
         if (currentState != FocusState.FOCUSING) return;
-        
+
         long now = System.currentTimeMillis();
         boolean needRestartTimer = false;
         boolean needRestartAnalysis = false;
-        
+
         // 检查计时器任务（超过3秒没有心跳则认为异常）
         if (lastTimerTickTime > 0 && (now - lastTimerTickTime) > 3000) {
             Log.w(TAG, "⚠️ 守护检测: 计时器任务停止，尝试重启...");
             needRestartTimer = true;
         }
-        
+
         // 检查分析任务（超过30秒没有心跳则认为异常，考虑AI响应时间和15秒间隔）
         if (lastAnalysisTime > 0 && (now - lastAnalysisTime) > 30000) {
             Log.w(TAG, "⚠️ 守护检测: 屏幕分析任务停止，尝试重启...");
             needRestartAnalysis = true;
         }
-        
+
         // 分别重启各个任务（不要因为一个任务问题影响另一个）
         if (needRestartTimer && watchdogRestartCount < 10) {
             watchdogRestartCount++;
@@ -511,7 +537,7 @@ public class FocusService extends Service {
             timerTask = executor.scheduleAtFixedRate(this::safeTimerTick, 0, 1, TimeUnit.SECONDS);
             lastTimerTickTime = now;
         }
-        
+
         if (needRestartAnalysis && watchdogRestartCount < 10) {
             watchdogRestartCount++;
             Log.w(TAG, "🔄 守护机制恢复屏幕分析 (第" + watchdogRestartCount + "次)");
@@ -522,31 +548,31 @@ public class FocusService extends Service {
             screenAnalysisTask = executor.scheduleAtFixedRate(this::safeAnalyzeScreen, 1, 15, TimeUnit.SECONDS);
             lastAnalysisTime = now;
         }
-        
+
         // 每30秒重置一次重启计数，避免长时间运行后无法重启
         if (watchdogRestartCount > 0 && (now % 30000) < 3000) {
             watchdogRestartCount = Math.max(0, watchdogRestartCount - 1);
         }
     }
-    
+
     // ==================== 计时器 ====================
-    
+
     private void timerTick() {
         if (currentState != FocusState.FOCUSING) return;
-        
+
         remainingMs -= 1000;
         if (remainingMs <= 0) {
             remainingMs = 0;
             mainHandler.post(this::onFocusComplete);
             return;
         }
-        
+
         // 每10秒更新一次实时数据到 SharedPreferences（供报告页面读取）
         long elapsedMs = focusDurationMs - remainingMs;
         if (elapsedMs % 10000 < 1000) {
             updateRealtimeStats();
         }
-        
+
         // 更新通知
         mainHandler.post(() -> {
             NotificationManager nm = getSystemService(NotificationManager.class);
@@ -554,7 +580,7 @@ public class FocusService extends Service {
                 nm.notify(NOTIFICATION_ID, createFocusNotification());
             }
         });
-        
+
         // 广播计时更新
         Intent intent = new Intent(ACTION_TIMER_TICK);
         intent.putExtra("remaining_ms", remainingMs);
@@ -563,27 +589,28 @@ public class FocusService extends Service {
         intent.putExtra("total_distractions", distractionManager != null ? distractionManager.getTotalDistractionCount() : 0);
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent);
     }
-    
+
     /**
      * 更新实时统计数据到 SharedPreferences（供报告页面读取）
      */
     private void updateRealtimeStats() {
         long elapsedMs = focusDurationMs - remainingMs;
         int elapsedMinutes = (int) (elapsedMs / 60000);
-        
+
         SharedPreferences prefs = getSharedPreferences("MindFlowPrefs", MODE_PRIVATE);
         prefs.edit()
             .putInt("current_session_minutes", elapsedMinutes)
             .putInt("current_distractions", distractionManager.getTotalDistractionCount())
+            .putInt("current_blocked_notifications", FocusModePreferences.getBlockedNotificationCount(this))
             .putString("current_distraction_history", distractionManager.getDistractionHistory())
             .apply();
     }
-    
+
     private void onFocusComplete() {
         Log.i(TAG, "专注完成！");
         stopFocusSession();
     }
-    
+
     /**
      * 广播初始 AI 状态，让 UI 立即更新
      */
@@ -596,32 +623,32 @@ public class FocusService extends Service {
         aiIntent.putExtra("current_app", currentForegroundApp.isEmpty() ? "检测中..." : currentForegroundApp);
         LocalBroadcastManager.getInstance(this).sendBroadcast(aiIntent);
     }
-    
+
     // ==================== 屏幕分析与分心检测 ====================
-    
+
     private void initScreenCapture() {
         int resultCode = ScreenCaptureDataHolder.getResultCode();
         Intent resultData = ScreenCaptureDataHolder.getResultData();
-        
+
         if (resultData != null && resultCode == Activity.RESULT_OK) {
             try {
                 // ⚠️ 关键：必须先启动前台服务，才能获取 MediaProjection！
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    startForeground(NOTIFICATION_ID, createScreenCaptureNotification(), 
+                    startForeground(NOTIFICATION_ID, createScreenCaptureNotification(),
                         ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
                 } else {
                     startForeground(NOTIFICATION_ID, createScreenCaptureNotification());
                 }
                 Log.d(TAG, "✅ 前台服务已启动（屏幕捕获模式）");
-                
-                MediaProjectionManager mpm = (MediaProjectionManager) 
+
+                MediaProjectionManager mpm = (MediaProjectionManager)
                     getSystemService(Context.MEDIA_PROJECTION_SERVICE);
                 mediaProjection = mpm.getMediaProjection(resultCode, resultData);
-                
+
                 if (mediaProjection != null) {
                     // 注册回调监听断开
                     mediaProjection.registerCallback(mediaProjectionCallback, mainHandler);
-                    
+
                     // 先设置监听器，再启动捕获
                     ScreenCaptureManager.getInstance().setAiListener(this::onScreenCaptured);
                     ScreenCaptureManager.getInstance().start(this, mediaProjection);
@@ -642,15 +669,15 @@ public class FocusService extends Service {
             screenCaptureStatus = "权限无效";
         }
     }
-    
+
     /**
      * 创建屏幕捕获专用通知
      */
     private Notification createScreenCaptureNotification() {
         Intent notificationIntent = new Intent(this, MainActivity.class);
-        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, 
+        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0,
             notificationIntent, PendingIntent.FLAG_IMMUTABLE);
-        
+
         return new NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("🎯 MindFlow 屏幕监控中")
             .setContentText("AI 正在分析您的屏幕内容")
@@ -660,7 +687,7 @@ public class FocusService extends Service {
             .setSilent(true)
             .build();
     }
-    
+
     private void stopScreenCapture() {
         if (isScreenCaptureActive) {
             ScreenCaptureManager.getInstance().stop();
@@ -668,16 +695,16 @@ public class FocusService extends Service {
         }
         ScreenCaptureDataHolder.clear();
     }
-    
+
     private void analyzeScreen() {
         if (currentState != FocusState.FOCUSING) return;
-        
+
         // 锁定页面或息屏时暂停监控
         if (isMonitoringPaused) {
             Log.d(TAG, "监控已暂停（锁定页面/息屏）");
             return;
         }
-        
+
         // 方案1: 尝试从 AccessibilityService 获取屏幕内容
         if (AppMonitorService.isRunning()) {
             String screenContent = AppMonitorService.getInstance().getScreenContent();
@@ -687,54 +714,57 @@ public class FocusService extends Service {
                 return;
             }
         }
-        
+
         // 方案2: 如果有截图，使用图片分析（由回调触发）
         if (isScreenCaptureActive) {
             Log.d(TAG, "等待屏幕截图...");
             return;
         }
-        
+
         // 方案3: 只根据包名简单判断
         Log.d(TAG, "使用包名简单判断: " + currentForegroundApp);
         analyzeByPackageName(currentForegroundApp);
     }
-    
+
     /**
      * 根据包名简单判断是否分心（备用方案）
      */
     private void analyzeByPackageName(String packageName) {
         final String pkg = (packageName == null || packageName.isEmpty()) ? "未知应用" : packageName;
-        
+        final Set<String> effectiveWhitelist = getEffectiveWhitelist();
+
         // 简单的包名判断逻辑
         boolean focused = true;
         final String activity = "使用 " + getAppNameFromPackage(pkg);
-        
+
         // 常见分心应用
         String[] distractionApps = {
-            "douyin", "tiktok", "bilibili", "weibo", "zhihu", 
+            "douyin", "tiktok", "bilibili", "weibo", "zhihu",
             "kuaishou", "xiaohongshu", "taobao", "jd.com", "pinduoduo",
             "tencent.mm", "qq.com", "game", "video", "music"
         };
-        
+
         for (String app : distractionApps) {
             if (pkg.toLowerCase().contains(app)) {
                 focused = false;
                 break;
             }
         }
-        
+
         // 白名单优先
-        if (whitelist.contains(pkg)) {
+        if (effectiveWhitelist.contains(pkg)) {
             focused = true;
         }
-        
+
         final boolean isFocused = focused;
-        final String result = activity + " | " + (isFocused ? "是" : "否");
-        
+        final String result = isFocused
+            ? "{\"conclusion\":\"YES\",\"behavior\":\"" + escapeJson(activity) + "\",\"reason\":\"符合目标：当前仅依据应用包名做保守判断，未发现明显分心信号。\",\"evidence\":[\"当前应用包名未命中高风险分心列表\"],\"confidence\":60,\"suggestion\":\"继续保持当前任务，若页面内容变化会再次分析。\"}"
+            : "{\"conclusion\":\"NO\",\"behavior\":\"" + escapeJson(activity) + "\",\"reason\":\"不符合目标：当前应用包名命中了高风险分心列表，且暂时无法获取更细的页面内容。\",\"evidence\":[\"当前应用属于短视频/社交/购物等高风险分心应用\"],\"confidence\":68,\"suggestion\":\"返回与任务相关的应用或等待页面文字分析结果。\"}";
+
         // 更新状态并广播
         mainHandler.post(() -> {
-            distractionManager.analyzeAndCheck(result, pkg, whitelist);
-            
+            distractionManager.analyzeAndCheck(result, pkg, effectiveWhitelist);
+
             Intent aiIntent = new Intent(ACTION_AI_RESULT);
             aiIntent.putExtra("vision", result);
             aiIntent.putExtra("activity", activity);
@@ -742,14 +772,17 @@ public class FocusService extends Service {
             aiIntent.putExtra("goal", focusGoal);
             aiIntent.putExtra("current_app", pkg);
             LocalBroadcastManager.getInstance(this).sendBroadcast(aiIntent);
-            
+
             if (!isFocused) {
                 handleDistraction();
             }
         });
     }
-    
+
     private String getAppNameFromPackage(String packageName) {
+        if (packageName == null || packageName.isEmpty()) {
+            return "未知应用";
+        }
         try {
             return getPackageManager().getApplicationLabel(
                 getPackageManager().getApplicationInfo(packageName, 0)).toString();
@@ -757,7 +790,7 @@ public class FocusService extends Service {
             return packageName.substring(packageName.lastIndexOf('.') + 1);
         }
     }
-    
+
     private String escapeJson(String text) {
         if (text == null) return "";
         return text.replace("\\", "\\\\")
@@ -766,30 +799,40 @@ public class FocusService extends Service {
                    .replace("\r", "\\r")
                    .replace("\t", "\\t");
     }
-    
+
     private void onScreenCaptured(Bitmap bitmap) {
         if (currentState != FocusState.FOCUSING || bitmap == null) return;
         if (isMonitoringPaused) {
             Log.d(TAG, "监控已暂停（锁定页面/息屏），跳过截图分析");
             return;
         }
-        
+        if (System.currentTimeMillis() - lastForegroundSwitchTime < APP_SWITCH_GRACE_MS) {
+            Log.d(TAG, "应用刚切换，跳过截图分析");
+            return;
+        }
+        if (!tryAcquireImageAnalysisSlot()) {
+            Log.d(TAG, "已有截图分析在进行中，跳过本次请求");
+            return;
+        }
+
         Log.d(TAG, "截图成功，正在发送给 AI 分析...");
-        
+        Set<String> effectiveWhitelist = getEffectiveWhitelist();
+
         // 将当前App名称传给AI，让AI结合App+屏幕内容综合判断
         String appName = getAppNameFromPackage(currentForegroundApp);
         GlmApiService.setCurrentAppName(appName);
-        
+
         GlmApiService.analyzeImage(bitmap, new GlmApiService.AiCallback() {
             @Override
             public void onSuccess(String result) {
+                releaseImageAnalysisSlot();
                 if (currentState != FocusState.FOCUSING) {
                     Log.d(TAG, "⏹️ 专注已停止，忽略截图AI结果");
                     return;
                 }
                 currentAiVision = result;
                 Log.d(TAG, "AI 分析结果: " + result);
-                
+
                 // 先进行分心检测（更新 DistractionManager 状态）
                 mainHandler.post(() -> {
                     if (currentState != FocusState.FOCUSING) {
@@ -797,8 +840,8 @@ public class FocusService extends Service {
                         return;
                     }
                     // 分析并检测分心
-                    boolean isDistracted = distractionManager.analyzeAndCheck(result, currentForegroundApp, whitelist);
-                    
+                    boolean isDistracted = distractionManager.analyzeAndCheck(result, currentForegroundApp, effectiveWhitelist);
+
                     // 广播 AI 结果（包含详细信息）
                     Intent aiIntent = new Intent(ACTION_AI_RESULT);
                     aiIntent.putExtra("vision", result);
@@ -807,16 +850,17 @@ public class FocusService extends Service {
                     aiIntent.putExtra("goal", focusGoal);
                     aiIntent.putExtra("current_app", currentForegroundApp);
                     LocalBroadcastManager.getInstance(FocusService.this).sendBroadcast(aiIntent);
-                    
+
                     // 处理分心警告
                     if (isDistracted) {
                         handleDistraction();
                     }
                 });
             }
-            
+
             @Override
             public void onFailure(String error) {
+                releaseImageAnalysisSlot();
                 if (currentState != FocusState.FOCUSING) {
                     Log.d(TAG, "⏹️ 专注已停止，忽略截图AI失败回调");
                     return;
@@ -838,7 +882,7 @@ public class FocusService extends Service {
             }
         });
     }
-    
+
     private void handleDistraction() {
         if (currentState != FocusState.FOCUSING) {
             Log.d(TAG, "专注未进行中，忽略分心处理");
@@ -849,69 +893,69 @@ public class FocusService extends Service {
             Log.d(TAG, "锁定中，跳过警告");
             return;
         }
-        
+
         DistractionManager.WarningLevel level = distractionManager.getWarningLevel();
-        
+
         Intent intent = new Intent(ACTION_WARNING);
         intent.putExtra("level", level.ordinal());
         intent.putExtra("message", distractionManager.getWarningMessage());
         intent.putExtra("count", distractionManager.getWarningCount());
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent);
-        
+
         // 只处理锁定逻辑，警告通知由 DistractionManager 统一发送（避免重复通知）
         if (level == DistractionManager.WarningLevel.LOCK) {
             triggerAppLock();
         }
         // WARNING 级别的通知已由 DistractionManager.executeWarning() 处理
     }
-    
+
     private void triggerAppLock() {
         if (currentState != FocusState.FOCUSING) {
             Log.d(TAG, "专注未进行中，禁止触发锁机");
             return;
         }
         Log.w(TAG, "触发应用锁定！");
-        
+
         // 获取分心记录
         String distractionRecords = distractionManager.getLockScreenDistractionRecords();
         String reason = "分心次数过多，需要冷却\n深呼吸，离开屏幕休息一下。\n冷却后继续专注于: " + focusGoal;
-        
+
         // 【关键】通知AppMonitorService激活锁机状态，并传递白名单
         AppMonitorService monitorService = AppMonitorService.getInstance();
         if (monitorService != null) {
             // 必须调用enableLockMode传递白名单，否则看门狗无法正确判断
-            monitorService.enableLockMode(whitelist, 60000L, reason, "", 
+            monitorService.enableLockMode(getEffectiveWhitelist(), 60000L, reason, "",
                 distractionManager.getWarningCount(), distractionRecords);
         }
-        
+
         // 启动锁机界面（优先悬浮窗，失败兜底 Activity）
         launchLockUI(60000L, reason);
-        
+
         // 暂停计时器和屏幕分析
         if (timerTask != null) timerTask.cancel(false);
         if (screenAnalysisTask != null) screenAnalysisTask.cancel(false);
         isMonitoringPaused = true;
-        
+
         // 重置分心计数（但不清空历史，报告需要用）
         distractionManager.onLockTriggered();
     }
-    
+
     /**
      * 直接显示锁机（由AppMonitorService调用）
      */
     public void showLockOverlayNow() {
         Log.w(TAG, "📢 showLockOverlayNow() 被调用！");
-        
+
         // 检查锁机是否已显示（悬浮窗或Activity）
         if (isLockScreenShowing()) {
             Log.d(TAG, "🔒 锁机已显示，跳过");
             return;
         }
-        
+
         // 检查AppMonitorService的锁机状态
         AppMonitorService service = AppMonitorService.getInstance();
         boolean serviceLockActive = service != null && service.isLockScreenActive();
-        
+
         if (serviceLockActive) {
             String reason = "检测到离开白名单应用\n请返回专注";
             launchLockUI(60000L, reason);
@@ -920,14 +964,14 @@ public class FocusService extends Service {
             Log.w(TAG, "⚠️ 锁机未激活，跳过");
         }
     }
-    
+
     /**
      * 检查锁机是否正在显示
      */
     private boolean isLockScreenShowing() {
         return LockWindowService.isActive() || com.example.mindflow.ui.lock.LockScreenActivity.isActive();
     }
-    
+
     /**
      * 关闭锁机（通过广播通知LockScreenActivity结束）
      */
@@ -938,7 +982,7 @@ public class FocusService extends Service {
             Log.e(TAG, "停止LockWindowService失败: " + e.getMessage());
         }
 
-        com.example.mindflow.ui.lock.LockScreenActivity instance = 
+        com.example.mindflow.ui.lock.LockScreenActivity instance =
             com.example.mindflow.ui.lock.LockScreenActivity.getInstance();
         if (instance != null) {
             instance.forceEnd();
@@ -965,7 +1009,7 @@ public class FocusService extends Service {
         }
         launchLockScreenActivity(durationMs, reason);
     }
-    
+
     /**
      * 启动锁机Activity（纯粹启动UI，不设置状态）
      * 注意：调用此方法前必须先调用 enableLockMode() 设置白名单
@@ -978,26 +1022,26 @@ public class FocusService extends Service {
             intent.putExtra("duration", durationMs);
             intent.putExtra("reason", reason);
             startActivity(intent);
-            
+
             Log.w(TAG, "✅ 已启动LockScreenActivity, 时长: " + durationMs + "ms");
         } catch (Exception e) {
             Log.e(TAG, "启动LockScreenActivity失败: " + e.getMessage());
         }
     }
-    
-    
+
+
     /**
      * 锁机结束回调 - 清理所有后台进程和通知
      */
     private void onLockScreenEnd() {
         Log.i(TAG, "🔓 锁机结束，清理后台");
-        
+
         // 停用锁机状态
         AppMonitorService monitorService = AppMonitorService.getInstance();
         if (monitorService != null) {
             monitorService.deactivateLockScreen();
         }
-        
+
         // 【关键】重置分心次数（恢复3/3机会）
         if (distractionManager != null) {
             distractionManager.resetDistractionCount();
@@ -1005,31 +1049,31 @@ public class FocusService extends Service {
             distractionManager.clearLockScreenCache();
             Log.i(TAG, "🔄 分心次数已重置为0");
         }
-        
+
         // 恢复监控和计时
         isMonitoringPaused = false;
         if (currentState == FocusState.FOCUSING) {
             // 先取消之前的任务（防止2倍速bug）
             if (timerTask != null) timerTask.cancel(false);
             if (screenAnalysisTask != null) screenAnalysisTask.cancel(false);
-            
+
             timerTask = executor.scheduleAtFixedRate(this::safeTimerTick, 0, 1, TimeUnit.SECONDS);
             screenAnalysisTask = executor.scheduleAtFixedRate(this::safeAnalyzeScreen, 5, 15, TimeUnit.SECONDS);
             Log.i(TAG, "▶️ 锁机结束，计时器和监控已恢复");
         }
-        
+
         // 取消所有锁机相关通知
         NotificationManagerCompat notificationManager = NotificationManagerCompat.from(this);
         notificationManager.cancel(NOTIFICATION_ID + 100); // 分心警告通知
-        
+
         broadcastStateChange();
         Log.i(TAG, "✅ 锁机清理完成，恢复正常监控");
     }
-    
+
     // ==================== 屏幕内容监听（AccessibilityService方式） ====================
-    
+
     private BroadcastReceiver screenContentReceiver;
-    
+
     private void registerScreenContentReceiver() {
         screenContentReceiver = new BroadcastReceiver() {
             @Override
@@ -1039,10 +1083,10 @@ public class FocusService extends Service {
                     Log.d(TAG, "监控已暂停（锁定页面/息屏），跳过屏幕内容分析");
                     return;
                 }
-                
+
                 String content = intent.getStringExtra(AppMonitorService.EXTRA_CONTENT);
                 String packageName = intent.getStringExtra(AppMonitorService.EXTRA_PACKAGE);
-                
+
                 if (content != null && !content.isEmpty()) {
                     Log.d(TAG, "收到屏幕内容，长度: " + content.length());
                     // 使用屏幕文字内容进行 AI 分析
@@ -1050,20 +1094,20 @@ public class FocusService extends Service {
                 }
             }
         };
-        
+
         IntentFilter filter = new IntentFilter(AppMonitorService.ACTION_SCREEN_CONTENT);
         LocalBroadcastManager.getInstance(this).registerReceiver(screenContentReceiver, filter);
     }
-    
+
     private void unregisterScreenContentReceiver() {
         if (screenContentReceiver != null) {
             LocalBroadcastManager.getInstance(this).unregisterReceiver(screenContentReceiver);
             screenContentReceiver = null;
         }
     }
-    
+
     // ==================== 锁屏/息屏状态监听 ====================
-    
+
     private BroadcastReceiver lockStateReceiver;
     private BroadcastReceiver unlockContinueReceiver;
     private BroadcastReceiver screenStateReceiver;
@@ -1071,7 +1115,7 @@ public class FocusService extends Service {
     private BroadcastReceiver triggerLockReceiver;      // 触发锁机的接收器
     private BroadcastReceiver lockEndedReceiver;        // 锁机结束接收器
     private boolean isMonitoringPaused = false;
-    
+
     private void registerLockAndScreenReceivers() {
         // 显示锁机接收器（当检测到非白名单应用时由AppMonitorService发送）
         showLockOverlayReceiver = new BroadcastReceiver() {
@@ -1081,9 +1125,9 @@ public class FocusService extends Service {
                 AppMonitorService service = AppMonitorService.getInstance();
                 boolean lockShowing = isLockScreenShowing();  // 检查悬浮窗和Activity
                 boolean serviceLockActive = service != null && service.isLockScreenActive();
-                
+
                 Log.w(TAG, "📊 状态: lockShowing=" + lockShowing + ", serviceLockActive=" + serviceLockActive);
-                
+
                 // 只要锁机仍在进行中且未显示，就重新启动
                 if (!lockShowing && serviceLockActive) {
                     String reason = "检测到离开白名单应用\n请返回专注";
@@ -1094,7 +1138,7 @@ public class FocusService extends Service {
         };
         LocalBroadcastManager.getInstance(this).registerReceiver(
             showLockOverlayReceiver, new IntentFilter("com.example.mindflow.SHOW_LOCK_OVERLAY"));
-        
+
         // 触发锁机广播接收器（来自MainActivity等外部触发）
         triggerLockReceiver = new BroadcastReceiver() {
             @Override
@@ -1102,20 +1146,20 @@ public class FocusService extends Service {
                 String reason = intent.getStringExtra("reason");
                 String advice = intent.getStringExtra("advice");
                 Log.d(TAG, "📩 收到触发锁机广播: " + reason);
-                
+
                 // 直接触发锁机
-                String fullReason = (reason != null ? reason : "分心次数过多") + 
+                String fullReason = (reason != null ? reason : "分心次数过多") +
                     "\n" + (advice != null ? advice : "请休息一下");
-                
+
                 // 【关键】激活锁机状态并传递白名单
                 AppMonitorService monitorService = AppMonitorService.getInstance();
                 if (monitorService != null) {
-                    monitorService.enableLockMode(whitelist, 60000L, fullReason, "", 0, "");
+                    monitorService.enableLockMode(getEffectiveWhitelist(), 60000L, fullReason, "", 0, "");
                 }
-                
+
                 // 启动锁机界面（优先悬浮窗，失败兜底 Activity）
                 launchLockUI(60000L, fullReason);
-                
+
                 // 暂停计时器和屏幕分析
                 if (timerTask != null) timerTask.cancel(false);
                 if (screenAnalysisTask != null) screenAnalysisTask.cancel(false);
@@ -1124,7 +1168,7 @@ public class FocusService extends Service {
         };
         LocalBroadcastManager.getInstance(this).registerReceiver(
             triggerLockReceiver, new IntentFilter("com.example.mindflow.TRIGGER_LOCK"));
-        
+
         // 【新增】锁机结束接收器（从LockScreenActivity发送）
         lockEndedReceiver = new BroadcastReceiver() {
             @Override
@@ -1135,7 +1179,7 @@ public class FocusService extends Service {
         };
         LocalBroadcastManager.getInstance(this).registerReceiver(
             lockEndedReceiver, new IntentFilter("com.example.mindflow.LOCK_ENDED"));
-        
+
         // 锁定页面状态接收器
         lockStateReceiver = new BroadcastReceiver() {
             @Override
@@ -1154,7 +1198,7 @@ public class FocusService extends Service {
         };
         LocalBroadcastManager.getInstance(this).registerReceiver(
             lockStateReceiver, new IntentFilter("com.example.mindflow.LOCK_SCREEN_STATE"));
-        
+
         // 解锁后继续监控接收器（用户点击返回后才触发）
         unlockContinueReceiver = new BroadcastReceiver() {
             @Override
@@ -1164,24 +1208,24 @@ public class FocusService extends Service {
                 distractionManager.resetDistractionCount();
                 distractionManager.setLocked(false);
                 isMonitoringPaused = false;
-                
+
                 // 恢复计时器和屏幕分析（如果当前仍在专注状态）
                 if (currentState == FocusState.FOCUSING) {
                     // 先取消之前的任务（防止2倍速bug）
                     if (timerTask != null) timerTask.cancel(false);
                     if (screenAnalysisTask != null) screenAnalysisTask.cancel(false);
-                    
+
                     timerTask = executor.scheduleAtFixedRate(FocusService.this::safeTimerTick, 0, 1, TimeUnit.SECONDS);
                     screenAnalysisTask = executor.scheduleAtFixedRate(FocusService.this::safeAnalyzeScreen, 5, 15, TimeUnit.SECONDS);
                     Log.i(TAG, "▶️ 计时器和监控已恢复(15秒间隔)");
                 }
-                
+
                 broadcastStateChange();
             }
         };
         LocalBroadcastManager.getInstance(this).registerReceiver(
             unlockContinueReceiver, new IntentFilter("com.example.mindflow.UNLOCK_AND_CONTINUE"));
-        
+
         // 系统息屏/亮屏接收器
         screenStateReceiver = new BroadcastReceiver() {
             @Override
@@ -1190,17 +1234,34 @@ public class FocusService extends Service {
                     isMonitoringPaused = true;
                     Log.d(TAG, "📴 屏幕关闭，暂停监控");
                 } else if (Intent.ACTION_SCREEN_ON.equals(intent.getAction())) {
-                    isMonitoringPaused = false;
-                    Log.d(TAG, "📱 屏幕亮起，恢复监控");
+                    Log.d(TAG, "📱 屏幕亮起，等待用户解锁后再恢复监控");
+                } else if (Intent.ACTION_USER_PRESENT.equals(intent.getAction())) {
+                    AppMonitorService monitorService = AppMonitorService.getInstance();
+                    boolean lockActive = monitorService != null && monitorService.isLockScreenActive();
+                    if (lockActive) {
+                        Log.d(TAG, "🔒 用户已解锁，锁机仍有效，准备恢复锁机界面");
+                        mainHandler.postDelayed(() -> {
+                            AppMonitorService latestService = AppMonitorService.getInstance();
+                            if (latestService == null || !latestService.isLockScreenActive()) {
+                                isMonitoringPaused = false;
+                                return;
+                            }
+                            showLockOverlayNow();
+                        }, 300);
+                    } else {
+                        isMonitoringPaused = false;
+                        Log.d(TAG, "🔓 用户已解锁，恢复监控");
+                    }
                 }
             }
         };
         IntentFilter screenFilter = new IntentFilter();
         screenFilter.addAction(Intent.ACTION_SCREEN_OFF);
         screenFilter.addAction(Intent.ACTION_SCREEN_ON);
+        screenFilter.addAction(Intent.ACTION_USER_PRESENT);
         registerReceiver(screenStateReceiver, screenFilter);
     }
-    
+
     private void unregisterLockAndScreenReceivers() {
         if (showLockOverlayReceiver != null) {
             LocalBroadcastManager.getInstance(this).unregisterReceiver(showLockOverlayReceiver);
@@ -1231,52 +1292,64 @@ public class FocusService extends Service {
             screenStateReceiver = null;
         }
     }
-    
+
     /**
      * 使用屏幕文字内容进行 AI 分析
-     * 
+     *
      * AI判断输入来源：
      * 1. 用户设置的专注目标（focusGoal）
      * 2. AccessibilityService获取的当前应用包名（packageName）
      * 3. AccessibilityService获取的屏幕文字内容（screenText）
      */
     private void analyzeScreenContent(String screenText, String packageName) {
+        if (!tryAcquireTextAnalysisSlot(screenText, packageName)) {
+            return;
+        }
+
+        Set<String> effectiveWhitelist = getEffectiveWhitelist();
         // 获取应用名称
         String appName = getAppNameFromPackage(packageName);
-        
-        // 【最高优先级】白名单检查 - 在白名单中直接返回，不调用AI
-        boolean isInWhitelist = whitelist.contains(packageName);
-        if (isInWhitelist) {
+
+        // 只有系统/用户显式白名单直接跳过 AI；任务相关应用仍需看内容，避免浏览器/聊天应用被永久放过
+        boolean isInHardWhitelist = whitelist.contains(packageName);
+        boolean isGoalRelevantApp = goalRelevantApps.contains(packageName);
+        if (isInHardWhitelist) {
             Log.d(TAG, "✅ 应用在白名单中，跳过AI分析: " + appName);
             // 直接广播结果，不调用AI
-            String result = "{\"conclusion\":\"YES\",\"reason\":\"应用在白名单中\",\"behavior\":\"使用白名单应用\",\"confidence\":100}";
+            String result = "{\"conclusion\":\"YES\",\"behavior\":\"使用白名单应用\",\"reason\":\"符合目标：该应用属于系统或用户显式允许的白名单，当前阶段默认视为任务相关操作。\",\"evidence\":[\"应用命中硬白名单\"],\"confidence\":100,\"suggestion\":\"继续当前任务，如页面内容明显偏离可调整白名单。\"}";
             mainHandler.post(() -> {
-                distractionManager.analyzeAndCheck(result, packageName, whitelist);
+                releaseTextAnalysisSlot();
+                distractionManager.analyzeAndCheck(result, packageName, effectiveWhitelist);
                 Intent aiIntent = new Intent(ACTION_AI_RESULT);
                 aiIntent.putExtra("vision", result);
                 aiIntent.putExtra("activity", "使用白名单应用: " + appName);
                 aiIntent.putExtra("is_focused", true);
                 aiIntent.putExtra("goal", focusGoal);
-                sendBroadcast(aiIntent);
+                LocalBroadcastManager.getInstance(FocusService.this).sendBroadcast(aiIntent);
             });
             return;
         }
-        
+
         // 判断是否为系统应用/桌面
-        boolean isLauncher = packageName.contains("launcher") || packageName.contains("home") || 
+        boolean isLauncher = packageName.contains("launcher") || packageName.contains("home") ||
                             packageName.contains("桌面") || appName.contains("桌面");
         boolean isSystemUi = packageName.contains("systemui") || packageName.contains("settings") ||
                             packageName.contains("inputmethod") || packageName.contains("keyboard");
-        
+        boolean appJustSwitched = System.currentTimeMillis() - lastForegroundSwitchTime < APP_SWITCH_GRACE_MS;
+
         // 提取屏幕特征
-        String truncatedScreen = screenText.length() > 300 ? 
+        String truncatedScreen = screenText.length() > 300 ?
             screenText.substring(0, 300) : screenText;
-        boolean hasCode = screenText.contains("public") || screenText.contains("private") || 
+        boolean hasCode = screenText.contains("public") || screenText.contains("private") ||
                          screenText.contains("function") || screenText.contains("class") ||
                          screenText.contains("import") || screenText.contains("return");
         boolean hasChat = screenText.contains("发送") || screenText.contains("消息") ||
                          screenText.contains("聊天") || screenText.contains("评论");
-        
+        boolean hasDocument = containsAny(screenText, "文档", "word", "excel", "ppt", "markdown", "notion", "会议纪要");
+        boolean hasLearning = containsAny(screenText, "课程", "论文", "题目", "背单词", "lecture", "readme", "stack overflow");
+        boolean hasEntertainment = containsAny(screenText, "推荐", "直播", "短视频", "点赞", "评论区", "热搜", "for you");
+        boolean hasShopping = containsAny(screenText, "购物车", "立即购买", "下单", "优惠券", "商品详情");
+
         // 构建JSON结构化输入
         String inputJson = "{\n" +
             "  \"task_goal\": \"" + escapeJson(focusGoal) + "\",\n" +
@@ -1285,52 +1358,68 @@ public class FocusService extends Service {
             "    \"package\": \"" + packageName + "\",\n" +
             "    \"is_launcher\": " + isLauncher + ",\n" +
             "    \"is_system_ui\": " + isSystemUi + ",\n" +
-            "    \"is_in_whitelist\": " + isInWhitelist + "\n" +
+            "    \"is_in_hard_whitelist\": " + isInHardWhitelist + ",\n" +
+            "    \"is_goal_relevant_app\": " + isGoalRelevantApp + "\n" +
+            "  },\n" +
+            "  \"recent_context\": {\n" +
+            "    \"app_just_switched\": " + appJustSwitched + ",\n" +
+            "    \"milliseconds_since_app_switch\": " + Math.max(0, System.currentTimeMillis() - lastForegroundSwitchTime) + "\n" +
             "  },\n" +
             "  \"screen_features\": {\n" +
             "    \"has_code\": " + hasCode + ",\n" +
             "    \"has_chat\": " + hasChat + ",\n" +
+            "    \"has_document\": " + hasDocument + ",\n" +
+            "    \"has_learning\": " + hasLearning + ",\n" +
+            "    \"has_entertainment\": " + hasEntertainment + ",\n" +
+            "    \"has_shopping\": " + hasShopping + ",\n" +
             "    \"text_preview\": \"" + escapeJson(truncatedScreen) + "\"\n" +
             "  }\n" +
             "}";
-        
-        // 构建AI提示词 - 要求JSON输出，确保conclusion和reason一致
+
+        // 构建AI提示词 - 对切应用/加载页走不确定态，避免一次误判直接记分
         String prompt = "你是专注力判断助手。根据以下JSON输入判断用户是否在专注任务。\n\n" +
                        "【输入】\n" + inputJson + "\n\n" +
-                       "【判断规则（按优先级，宽松判断）】\n" +
-                       "1. is_in_whitelist=true → YES\n" +
-                       "2. is_system_ui=true → YES\n" +
-                       "3. is_launcher=true → YES（用户可能在切换应用）\n" +
-                       "4. 应用或内容与任务目标有任何关联 → YES\n" +
-                       "5. 只有完全无关且明显是娱乐（如游戏、短视频）→ NO\n\n" +
+                       "【判断规则（按优先级）】\n" +
+                       "1. is_in_hard_whitelist=true → YES\n" +
+                       "2. is_system_ui=true 或 is_launcher=true → YES\n" +
+                       "3. app_just_switched=true、界面像加载页/权限页/通知页、证据不足 → UNSURE\n" +
+                       "4. 应用或内容与任务目标明显相关 → YES\n" +
+                       "5. 只有当前行为与任务明显无关，且是娱乐/社交闲逛/购物/纯聊天时 → NO\n\n" +
                        "【重要】conclusion和reason必须一致！\n" +
                        "- 如果conclusion=YES，reason必须说\"符合目标\"\n" +
-                       "- 如果conclusion=NO，reason必须说\"不符合目标\"\n\n" +
+                       "- 如果conclusion=NO，reason必须说\"不符合目标\"\n" +
+                       "- 如果conclusion=UNSURE，reason必须说\"信息不足\"或\"正在切换/加载\"\n\n" +
+                       "【reason要求】至少覆盖 4 点：任务目标、当前页面行为、关键证据、最终结论。\n" +
+                       "【evidence要求】返回 1-3 条短证据。\n" +
+                       "【suggestion要求】返回一句可执行建议。\n\n" +
                        "【输出格式】只返回JSON，不要其他文字：\n" +
-                       "{\"conclusion\":\"YES\",\"reason\":\"符合目标：用户任务是XX，当前在XX\",\"behavior\":\"当前行为\",\"confidence\":85}\n" +
+                       "{\"conclusion\":\"YES\",\"behavior\":\"当前行为\",\"reason\":\"符合目标：用户任务是XX，当前页面在做XX，证据是XX，因此判断仍在任务内。\",\"evidence\":[\"证据1\",\"证据2\"],\"confidence\":85,\"suggestion\":\"继续当前任务。\"}\n" +
                        "或\n" +
-                       "{\"conclusion\":\"NO\",\"reason\":\"不符合目标：用户任务是XX，但当前在XX\",\"behavior\":\"当前行为\",\"confidence\":75}";
-        
+                       "{\"conclusion\":\"NO\",\"behavior\":\"当前行为\",\"reason\":\"不符合目标：用户任务是XX，但当前页面在做XX，关键证据是XX，因此判断偏离目标。\",\"evidence\":[\"证据1\",\"证据2\"],\"confidence\":75,\"suggestion\":\"关闭当前页面并返回任务相关页面。\"}\n" +
+                       "或\n" +
+                       "{\"conclusion\":\"UNSURE\",\"behavior\":\"切换页面\",\"reason\":\"信息不足：刚切换应用/界面仍在加载，当前证据不足以稳定判断。\",\"evidence\":[\"页面内容很少\"],\"confidence\":40,\"suggestion\":\"等待页面稳定后再判断。\"}";
+
         GlmApiService.analyzeText(prompt, new GlmApiService.AiCallback() {
             @Override
             public void onSuccess(String result) {
+                releaseTextAnalysisSlot();
                 // 停止专注后忽略AI结果，不再处理
                 if (currentState != FocusState.FOCUSING) {
                     Log.d(TAG, "⏹️ 专注已停止，忽略AI结果");
                     return;
                 }
-                
+
                 Log.d(TAG, "AI 文字分析结果: " + result);
-                
+
                 mainHandler.post(() -> {
                     // 再次检查状态（防止并发）
                     if (currentState != FocusState.FOCUSING) {
                         Log.d(TAG, "⏹️ 专注已停止，忽略AI结果(主线程)");
                         return;
                     }
-                    
-                    boolean isDistracted = distractionManager.analyzeAndCheck(result, packageName, whitelist);
-                    
+
+                    boolean isDistracted = distractionManager.analyzeAndCheck(result, packageName, effectiveWhitelist);
+
                     // 广播 AI 结果
                     Intent aiIntent = new Intent(ACTION_AI_RESULT);
                     aiIntent.putExtra("vision", result);
@@ -1339,22 +1428,23 @@ public class FocusService extends Service {
                     aiIntent.putExtra("goal", focusGoal);
                     aiIntent.putExtra("current_app", packageName);
                     LocalBroadcastManager.getInstance(FocusService.this).sendBroadcast(aiIntent);
-                    
+
                     if (isDistracted) {
                         handleDistraction();
                     }
                 });
             }
-            
+
             @Override
             public void onFailure(String error) {
+                releaseTextAnalysisSlot();
                 // 停止专注后忽略错误
                 if (currentState != FocusState.FOCUSING) return;
-                
+
                 Log.w(TAG, "AI 文字分析失败: " + error);
                 mainHandler.post(() -> {
                     if (currentState != FocusState.FOCUSING) return;
-                    
+
                     Intent aiIntent = new Intent(ACTION_AI_RESULT);
                     aiIntent.putExtra("vision", "AI 分析失败: " + error);
                     aiIntent.putExtra("activity", "分析失败");
@@ -1365,21 +1455,22 @@ public class FocusService extends Service {
             }
         });
     }
-    
+
     // ==================== 前台应用监控 ====================
-    
+
     public void onForegroundAppChanged(String packageName) {
         this.currentForegroundApp = packageName;
+        this.lastForegroundSwitchTime = System.currentTimeMillis();
         Log.d(TAG, "前台应用切换: " + packageName);
     }
-    
+
     // ==================== 白名单管理 ====================
-    
+
     private void loadWhitelist() {
         SharedPreferences prefs = getSharedPreferences("MindFlowPrefs", MODE_PRIVATE);
         whitelist = new HashSet<>(prefs.getStringSet("whitelist", new HashSet<>()));
         whitelist = sanitizeWhitelist(whitelist);
-        
+
         // 默认白名单：系统必要应用
         whitelist.add(getPackageName()); // 自身
         whitelist.add("com.android.settings"); // 设置
@@ -1403,12 +1494,15 @@ public class FocusService extends Service {
         whitelist = sanitizeWhitelist(whitelist);
         prefs.edit().putStringSet("whitelist", new HashSet<>(whitelist)).apply();
     }
-    
+
     public void updateWhitelist(Set<String> newWhitelist) {
         this.whitelist = sanitizeWhitelist(newWhitelist);
         whitelist.add(getPackageName());
         whitelist.add("com.android.settings");
-        
+        if (distractionManager != null) {
+            distractionManager.setWhitelist(getEffectiveWhitelist());
+        }
+
         SharedPreferences prefs = getSharedPreferences("MindFlowPrefs", MODE_PRIVATE);
         prefs.edit().putStringSet("whitelist", whitelist).apply();
     }
@@ -1439,89 +1533,180 @@ public class FocusService extends Service {
         }
         return out;
     }
-    
+
     public Set<String> getWhitelist() {
         return new HashSet<>(whitelist);
     }
-    
+
     /**
      * 根据专注目标智能添加白名单
      * 如：任务是"用微信工作"，则微信自动进白名单
      */
-    private void addSmartWhitelist(String goal) {
-        if (goal == null || goal.isEmpty()) return;
-        
+    private void rebuildGoalRelevantApps() {
+        goalRelevantApps.clear();
+        goalRelevantApps.addAll(sanitizeWhitelist(buildGoalRelevantApps(focusGoal)));
+    }
+
+    private Set<String> buildGoalRelevantApps(String goal) {
+        Set<String> smartApps = new HashSet<>();
+        if (goal == null || goal.isEmpty()) return smartApps;
+
         String lowerGoal = goal.toLowerCase();
-        
+
         // 微信相关
         if (lowerGoal.contains("微信") || lowerGoal.contains("wechat")) {
-            whitelist.add("com.tencent.mm");
+            smartApps.add("com.tencent.mm");
             Log.d(TAG, "智能白名单: 添加微信");
         }
-        
+
         // QQ相关
         if (lowerGoal.contains("qq")) {
-            whitelist.add("com.tencent.mobileqq");
+            smartApps.add("com.tencent.mobileqq");
             Log.d(TAG, "智能白名单: 添加QQ");
         }
-        
+
         // 钉钉相关
         if (lowerGoal.contains("钉钉") || lowerGoal.contains("dingtalk")) {
-            whitelist.add("com.alibaba.android.rimet");
+            smartApps.add("com.alibaba.android.rimet");
             Log.d(TAG, "智能白名单: 添加钉钉");
         }
-        
+
         // 飞书相关
         if (lowerGoal.contains("飞书") || lowerGoal.contains("lark")) {
-            whitelist.add("com.ss.android.lark");
+            smartApps.add("com.ss.android.lark");
             Log.d(TAG, "智能白名单: 添加飞书");
         }
-        
+
         // 企业微信
         if (lowerGoal.contains("企业微信") || lowerGoal.contains("企微")) {
-            whitelist.add("com.tencent.wework");
+            smartApps.add("com.tencent.wework");
             Log.d(TAG, "智能白名单: 添加企业微信");
         }
-        
+
         // 浏览器相关
         if (lowerGoal.contains("浏览器") || lowerGoal.contains("网页") || lowerGoal.contains("查资料")) {
-            whitelist.add("com.android.chrome");
-            whitelist.add("com.huawei.browser");
-            whitelist.add("com.miui.browser");
-            whitelist.add("com.vivo.browser");
-            whitelist.add("com.oppo.browser");
+            smartApps.add("com.android.chrome");
+            smartApps.add("com.huawei.browser");
+            smartApps.add("com.miui.browser");
+            smartApps.add("com.vivo.browser");
+            smartApps.add("com.oppo.browser");
             Log.d(TAG, "智能白名单: 添加浏览器");
         }
-        
+
         // 笔记相关
         if (lowerGoal.contains("笔记") || lowerGoal.contains("notion") || lowerGoal.contains("备忘")) {
-            whitelist.add("notion.id");
-            whitelist.add("com.evernote");
-            whitelist.add("com.miui.notes");
+            smartApps.add("notion.id");
+            smartApps.add("com.evernote");
+            smartApps.add("com.miui.notes");
             Log.d(TAG, "智能白名单: 添加笔记应用");
         }
-        
+
         // 邮件相关
         if (lowerGoal.contains("邮件") || lowerGoal.contains("邮箱") || lowerGoal.contains("email")) {
-            whitelist.add("com.google.android.gm");
-            whitelist.add("com.netease.mail");
-            whitelist.add("com.tencent.androidqqmail");
+            smartApps.add("com.google.android.gm");
+            smartApps.add("com.netease.mail");
+            smartApps.add("com.tencent.androidqqmail");
             Log.d(TAG, "智能白名单: 添加邮件应用");
         }
+
+        return smartApps;
     }
-    
+
+    private Set<String> getEffectiveWhitelist() {
+        Set<String> effective = new HashSet<>(whitelist);
+        effective.addAll(goalRelevantApps);
+        return effective;
+    }
+
+    private synchronized boolean tryAcquireTextAnalysisSlot(String screenText, String packageName) {
+        if (screenText == null || packageName == null || packageName.isEmpty()) {
+            return false;
+        }
+        if (isTextAnalysisInFlight) {
+            Log.d(TAG, "已有文字分析在进行中，跳过本次请求");
+            return false;
+        }
+        long now = System.currentTimeMillis();
+        if (now - lastForegroundSwitchTime < APP_SWITCH_GRACE_MS) {
+            Log.d(TAG, "应用刚切换，先等待界面稳定再分析");
+            return false;
+        }
+        String normalized = normalizeScreenText(screenText);
+        if (normalized.length() < MIN_SCREEN_TEXT_LENGTH) {
+            Log.d(TAG, "屏幕文本有效信息不足，跳过AI分析");
+            return false;
+        }
+        String analysisKey = packageName + "|" + normalized;
+        if (analysisKey.equals(lastTextAnalysisKey) && now - lastTextAnalysisAt < SAME_TEXT_ANALYSIS_COOLDOWN_MS) {
+            Log.d(TAG, "同一页面近期已分析，跳过重复请求");
+            return false;
+        }
+        if (now - lastTextAnalysisAt < MIN_TEXT_ANALYSIS_INTERVAL_MS) {
+            Log.d(TAG, "距离上次文字分析过近，跳过本次请求");
+            return false;
+        }
+        isTextAnalysisInFlight = true;
+        lastTextAnalysisAt = now;
+        lastTextAnalysisKey = analysisKey;
+        return true;
+    }
+
+    private synchronized void releaseTextAnalysisSlot() {
+        isTextAnalysisInFlight = false;
+    }
+
+    private synchronized boolean tryAcquireImageAnalysisSlot() {
+        if (isImageAnalysisInFlight) {
+            return false;
+        }
+        isImageAnalysisInFlight = true;
+        return true;
+    }
+
+    private synchronized void releaseImageAnalysisSlot() {
+        isImageAnalysisInFlight = false;
+    }
+
+    private void resetAnalysisState() {
+        isTextAnalysisInFlight = false;
+        isImageAnalysisInFlight = false;
+        lastTextAnalysisAt = 0;
+        lastTextAnalysisKey = "";
+        lastForegroundSwitchTime = 0;
+    }
+
+    private String normalizeScreenText(String text) {
+        if (text == null) return "";
+        String normalized = text.replaceAll("\\s+", " ").trim().toLowerCase();
+        if (normalized.length() > 180) {
+            return normalized.substring(0, 180);
+        }
+        return normalized;
+    }
+
+    private boolean containsAny(String text, String... keywords) {
+        if (text == null || text.isEmpty()) return false;
+        String lower = text.toLowerCase();
+        for (String keyword : keywords) {
+            if (lower.contains(keyword.toLowerCase())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // ==================== 通知 ====================
-    
+
     private void createNotificationChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationManager nm = getSystemService(NotificationManager.class);
-            
+
             // 专注通知渠道
             NotificationChannel focusChannel = new NotificationChannel(
                 CHANNEL_ID, "专注模式", NotificationManager.IMPORTANCE_LOW);
             focusChannel.setDescription("显示专注计时状态");
             nm.createNotificationChannel(focusChannel);
-            
+
             // 锁定通知渠道（高优先级）
             NotificationChannel lockChannel = new NotificationChannel(
                 CHANNEL_LOCK_ID, "锁定提醒", NotificationManager.IMPORTANCE_HIGH);
@@ -1529,16 +1714,16 @@ public class FocusService extends Service {
             nm.createNotificationChannel(lockChannel);
         }
     }
-    
+
     private Notification createFocusNotification() {
         int minutes = (int) (remainingMs / 60000);
         int seconds = (int) ((remainingMs % 60000) / 1000);
         String timeText = String.format("%02d:%02d", minutes, seconds);
-        
+
         Intent notificationIntent = new Intent(this, MainActivity.class);
-        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, 
+        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0,
             notificationIntent, PendingIntent.FLAG_IMMUTABLE);
-        
+
         return new NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("专注中 - " + timeText)
             .setContentText("AI 正在守护您的专注状态")
@@ -1548,16 +1733,16 @@ public class FocusService extends Service {
             .setSilent(true)
             .build();
     }
-    
+
     // ==================== 状态广播 ====================
-    
+
     private void broadcastStateChange() {
         Intent intent = new Intent(ACTION_FOCUS_STATE_CHANGED);
         intent.putExtra("state", currentState.ordinal());
         intent.putExtra("remaining_ms", remainingMs);
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent);
     }
-    
+
     /**
      * 广播屏幕捕获状态
      */
@@ -1570,13 +1755,13 @@ public class FocusService extends Service {
         intent.putExtra("current_app", currentForegroundApp);
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent);
     }
-    
+
     public String getScreenCaptureStatus() {
         return screenCaptureStatus;
     }
-    
+
     // ==================== Getter ====================
-    
+
     public FocusState getCurrentState() { return currentState; }
     public long getRemainingMs() { return remainingMs; }
     public long getFocusDurationMs() { return focusDurationMs; }

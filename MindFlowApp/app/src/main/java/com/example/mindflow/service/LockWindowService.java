@@ -4,8 +4,10 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
@@ -84,6 +86,8 @@ public class LockWindowService extends Service {
     
     // 白名单适配器
     private WhitelistAdapter whitelistAdapter;
+    private BroadcastReceiver screenStateReceiver;
+    private boolean hiddenForDeviceUnlock = false;
     
     public static LockWindowService getInstance() {
         return instance;
@@ -99,6 +103,7 @@ public class LockWindowService extends Service {
         instance = this;
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
         createNotificationChannel();
+        registerScreenStateReceiver();
         Log.i(TAG, "🔒 LockWindowService 创建");
     }
     
@@ -134,6 +139,7 @@ public class LockWindowService extends Service {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        unregisterScreenStateReceiver();
         hideLock();
         releaseWakeLock();
         instance = null;
@@ -163,14 +169,7 @@ public class LockWindowService extends Service {
         tvReason.setText(lockReason);
         
         // 设置沉浸式（关键：防止上滑）
-        lockView.setSystemUiVisibility(
-            View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
-            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
-            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
-            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
-            View.SYSTEM_UI_FLAG_FULLSCREEN |
-            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-        );
+        applyImmersiveMode();
         
         // 添加到窗口
         try {
@@ -211,6 +210,7 @@ public class LockWindowService extends Service {
         }
         
         isLockActive = false;
+        hiddenForDeviceUnlock = false;
     }
     
     // ==================== 窗口参数（关键配置）====================
@@ -234,7 +234,6 @@ public class LockWindowService extends Service {
                 | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS  // 延伸到屏幕外，覆盖刘海和导航条
                 | WindowManager.LayoutParams.FLAG_FULLSCREEN
                 | WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
-                | WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
                 | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
                 | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED;
         
@@ -384,19 +383,10 @@ public class LockWindowService extends Service {
             windowParams.width = WindowManager.LayoutParams.MATCH_PARENT;
             windowParams.height = WindowManager.LayoutParams.MATCH_PARENT;
             windowParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+            windowParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
             try {
                 windowManager.updateViewLayout(lockView, windowParams);
-                
-                // 重新设置沉浸式
-                lockView.setSystemUiVisibility(
-                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
-                    View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
-                    View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
-                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
-                    View.SYSTEM_UI_FLAG_FULLSCREEN |
-                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                );
-                
+                applyImmersiveMode();
                 Log.i(TAG, "🔒 锁机窗口已恢复");
             } catch (Exception e) {
                 Log.e(TAG, "恢复失败: " + e.getMessage());
@@ -506,6 +496,76 @@ public class LockWindowService extends Service {
     }
     
     // ==================== 通知 ====================
+
+    private void registerScreenStateReceiver() {
+        screenStateReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                String action = intent.getAction();
+                if (Intent.ACTION_SCREEN_OFF.equals(action)) {
+                    prepareForDeviceUnlock();
+                } else if (Intent.ACTION_USER_PRESENT.equals(action)) {
+                    restoreAfterDeviceUnlock();
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_SCREEN_OFF);
+        filter.addAction(Intent.ACTION_USER_PRESENT);
+        registerReceiver(screenStateReceiver, filter);
+    }
+
+    private void unregisterScreenStateReceiver() {
+        if (screenStateReceiver == null) {
+            return;
+        }
+        try {
+            unregisterReceiver(screenStateReceiver);
+        } catch (Exception e) {
+            Log.w(TAG, "注销息屏接收器失败", e);
+        }
+        screenStateReceiver = null;
+    }
+
+    private void prepareForDeviceUnlock() {
+        if (!isLockActive || lockView == null || windowParams == null) {
+            return;
+        }
+        hiddenForDeviceUnlock = true;
+        windowParams.width = 1;
+        windowParams.height = 1;
+        windowParams.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+        windowParams.flags |= WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+        try {
+            windowManager.updateViewLayout(lockView, windowParams);
+            Log.i(TAG, "🔐 锁机悬浮层已让出系统解锁界面");
+        } catch (Exception e) {
+            Log.e(TAG, "让出系统解锁界面失败: " + e.getMessage());
+        }
+    }
+
+    private void restoreAfterDeviceUnlock() {
+        if (!hiddenForDeviceUnlock || !isLockActive || lockView == null || windowParams == null) {
+            return;
+        }
+        hiddenForDeviceUnlock = false;
+        restoreLockView();
+        Log.i(TAG, "🔒 用户解锁后恢复锁机悬浮层");
+    }
+
+    private void applyImmersiveMode() {
+        if (lockView == null) {
+            return;
+        }
+        lockView.setSystemUiVisibility(
+            View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
+            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
+            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
+            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
+            View.SYSTEM_UI_FLAG_FULLSCREEN |
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+        );
+    }
     
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

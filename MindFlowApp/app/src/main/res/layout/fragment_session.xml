@@ -144,7 +144,7 @@
                     android:layout_marginTop="12dp"
                     android:orientation="horizontal"
                     android:gravity="center_vertical">
-                    
+
                     <TextView
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
@@ -152,7 +152,7 @@
                         android:text="白名单应用（专注期间可用）"
                         android:textColor="@color/text_secondary"
                         android:textSize="13sp" />
-                    
+
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/btnWhitelist"
                         style="@style/Widget.Material3.Button.TextButton"
@@ -161,7 +161,7 @@
                         android:text="设置"
                         android:textSize="12sp" />
                 </LinearLayout>
-                
+
                 <!-- 白名单数量显示 -->
                 <TextView
                     android:id="@+id/tvWhitelistCount"
@@ -170,7 +170,7 @@
                     android:text="已选择 0 个应用"
                     android:textColor="@color/text_hint"
                     android:textSize="11sp" />
-                    
+
                 <!-- 添加当前应用按钮 -->
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnAddCurrentApp"
@@ -323,7 +323,39 @@
                     android:textColor="@color/text_hint"
                     android:textSize="11sp"
                     android:fontFamily="monospace"
-                    android:maxLines="10" />
+                    android:maxLines="14" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:gravity="end"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnAiCorrect"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="36dp"
+                        android:text="判对了"
+                        android:textSize="12sp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnAiIncorrect"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="36dp"
+                        android:text="判错了"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/tvAiFeedbackStatus"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="AI 反馈样本：0 条"
+                    android:textColor="@color/text_hint"
+                    android:textSize="11sp" />
 
                 <LinearLayout
                     android:layout_width="match_parent"
