@@ -130,7 +130,7 @@
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="白名单应用"
+                    android:text="允许使用应用"
                     android:padding="16dp"
                     android:textSize="18sp"
                     android:textStyle="bold"

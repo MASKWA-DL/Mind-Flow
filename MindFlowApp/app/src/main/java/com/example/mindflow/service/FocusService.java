@@ -31,6 +31,8 @@ import com.example.mindflow.MainActivity;
 import com.example.mindflow.R;
 import com.example.mindflow.network.GlmApiService;
 import com.example.mindflow.utils.FocusModePreferences;
+import com.example.mindflow.utils.FocusGoalInterpreter;
+import com.example.mindflow.utils.FocusLocalRuleEngine;
 import com.example.mindflow.utils.PermissionHelper;
 import com.example.mindflow.utils.ScreenCaptureDataHolder;
 import com.example.mindflow.utils.ScreenCaptureManager;
@@ -65,6 +67,8 @@ public class FocusService extends Service {
     public static final String ACTION_FOCUS_STATE_CHANGED = "com.example.mindflow.FOCUS_STATE_CHANGED";
     public static final String ACTION_AI_RESULT = "com.example.mindflow.AI_RESULT";
     public static final String ACTION_WARNING = "com.example.mindflow.WARNING";
+    private static final String PREFS_NAME = "MindFlowPrefs";
+    private static final String KEY_WHITELIST = "whitelist";
 
     // 状态
     public enum FocusState {
@@ -81,9 +85,14 @@ public class FocusService extends Service {
     private String currentAiVision = "未知";
     private String currentForegroundApp = "";
     private String focusGoal = "工作"; // 用户的专注目标
+    private String lastPageUrl = "";
+    private String lastPageDomain = "";
+    private String lastPageTitle = "";
+    private String lastSearchQuery = "";
 
-    // 白名单：whitelist 仅包含系统/用户显式允许的应用；goalRelevantApps 是任务相关但仍需 AI 判定内容的应用
-    private Set<String> whitelist = new HashSet<>();
+    // userAllowedApps 只用于“允许使用/免锁机干预”；systemExemptApps 是系统必要应用；goalRelevantApps 仅作为 AI 上下文
+    private final Set<String> userAllowedApps = new HashSet<>();
+    private final Set<String> systemExemptApps = new HashSet<>();
     private final Set<String> goalRelevantApps = new HashSet<>();
 
     private static final long APP_SWITCH_GRACE_MS = 2500L;
@@ -299,7 +308,7 @@ public class FocusService extends Service {
             GlmApiService.setFocusGoal(this.focusGoal);
             rebuildGoalRelevantApps();
             if (distractionManager != null) {
-                distractionManager.setWhitelist(getEffectiveWhitelist());
+                distractionManager.setInterventionExemptApps(getInterventionExemptApps());
             }
             Log.d(TAG, "专注目标设置为: " + this.focusGoal);
         }
@@ -332,8 +341,8 @@ public class FocusService extends Service {
         String sessionId = "session_" + System.currentTimeMillis();
         distractionManager.setSessionId(sessionId);
 
-        // 传递白名单给DistractionManager（锁机时用）
-        distractionManager.setWhitelist(getEffectiveWhitelist());
+        // 传递“允许使用应用”给 DistractionManager（只影响是否干预，不代表算命中目标）
+        distractionManager.setInterventionExemptApps(getInterventionExemptApps());
 
         // 【重要】重置AI请求取消状态
         GlmApiService.resetCancelState();
@@ -707,10 +716,18 @@ public class FocusService extends Service {
 
         // 方案1: 尝试从 AccessibilityService 获取屏幕内容
         if (AppMonitorService.isRunning()) {
-            String screenContent = AppMonitorService.getInstance().getScreenContent();
+            AppMonitorService monitorService = AppMonitorService.getInstance();
+            String screenContent = monitorService.getScreenContent();
             if (screenContent != null && screenContent.length() > 10) {
                 Log.d(TAG, "使用 AccessibilityService 获取屏幕内容");
-                analyzeScreenContent(screenContent, currentForegroundApp);
+                analyzeScreenContent(
+                    screenContent,
+                    currentForegroundApp,
+                    monitorService.getLastPageUrl(),
+                    monitorService.getLastPageDomain(),
+                    monitorService.getLastPageTitle(),
+                    monitorService.getLastSearchQuery()
+                );
                 return;
             }
         }
@@ -731,49 +748,42 @@ public class FocusService extends Service {
      */
     private void analyzeByPackageName(String packageName) {
         final String pkg = (packageName == null || packageName.isEmpty()) ? "未知应用" : packageName;
-        final Set<String> effectiveWhitelist = getEffectiveWhitelist();
+        final Set<String> interventionExemptApps = getInterventionExemptApps();
+        final String appName = getAppNameFromPackage(pkg);
+        final String appCategory = FocusGoalInterpreter.classifyApp(pkg, appName);
+        final boolean isSystemExemptApp = isSystemExemptApp(pkg);
+        final boolean isUserAllowedApp = isUserAllowedApp(pkg);
+        final boolean shouldFallbackToUnsure = FocusGoalInterpreter.shouldFallbackToUnsure(focusGoal, pkg, appName);
 
-        // 简单的包名判断逻辑
-        boolean focused = true;
-        final String activity = "使用 " + getAppNameFromPackage(pkg);
-
-        // 常见分心应用
-        String[] distractionApps = {
-            "douyin", "tiktok", "bilibili", "weibo", "zhihu",
-            "kuaishou", "xiaohongshu", "taobao", "jd.com", "pinduoduo",
-            "tencent.mm", "qq.com", "game", "video", "music"
-        };
-
-        for (String app : distractionApps) {
-            if (pkg.toLowerCase().contains(app)) {
-                focused = false;
-                break;
-            }
-        }
-
-        // 白名单优先
-        if (effectiveWhitelist.contains(pkg)) {
-            focused = true;
-        }
+        boolean focused = isSystemExemptApp || FocusGoalInterpreter.isPackageLikelyRelevant(focusGoal, pkg, appName);
+        final String activity = "使用 " + appName;
 
         final boolean isFocused = focused;
-        final String result = isFocused
-            ? "{\"conclusion\":\"YES\",\"behavior\":\"" + escapeJson(activity) + "\",\"reason\":\"符合目标：当前仅依据应用包名做保守判断，未发现明显分心信号。\",\"evidence\":[\"当前应用包名未命中高风险分心列表\"],\"confidence\":60,\"suggestion\":\"继续保持当前任务，若页面内容变化会再次分析。\"}"
-            : "{\"conclusion\":\"NO\",\"behavior\":\"" + escapeJson(activity) + "\",\"reason\":\"不符合目标：当前应用包名命中了高风险分心列表，且暂时无法获取更细的页面内容。\",\"evidence\":[\"当前应用属于短视频/社交/购物等高风险分心应用\"],\"confidence\":68,\"suggestion\":\"返回与任务相关的应用或等待页面文字分析结果。\"}";
+        final String reasonSuffix = !isFocused && isUserAllowedApp
+            ? " 该应用被配置为“专注期间允许使用”，因此系统不会仅因打开它就直接锁机，但它仍不算命中当前目标。"
+            : "";
+        final String result;
+        if (shouldFallbackToUnsure && !isSystemExemptApp) {
+            result = "{\"conclusion\":\"UNSURE\",\"behavior\":\"" + escapeJson(activity) + "\",\"reason\":\"信息不足：当前只能确认应用类别为 " + escapeJson(appCategory) + "，但浏览器/未知应用需要结合页面内容才能稳定判断是否符合目标。\",\"evidence\":[\"仅有应用级信息，缺少页面文字或截图证据\",\"当前应用类别属于高歧义场景\"],\"confidence\":45,\"suggestion\":\"等待页面稳定后再判断，或切换到更明确的任务页面。\"}";
+        } else if (isFocused) {
+            result = "{\"conclusion\":\"YES\",\"behavior\":\"" + escapeJson(activity) + "\",\"reason\":\"" + escapeJson(FocusGoalInterpreter.buildFallbackReason(focusGoal, pkg, appName, true)) + "\",\"evidence\":[\"应用类别为 " + escapeJson(appCategory) + "\",\"当前无法读取更多页面文本，因此先按目标语义做保守匹配\"],\"confidence\":60,\"suggestion\":\"继续当前任务，若页面内容稳定后会进行更细的文字或截图分析。\"}";
+        } else {
+            result = "{\"conclusion\":\"NO\",\"behavior\":\"" + escapeJson(activity) + "\",\"reason\":\"" + escapeJson(FocusGoalInterpreter.buildFallbackReason(focusGoal, pkg, appName, false) + reasonSuffix) + "\",\"evidence\":[\"应用类别为 " + escapeJson(appCategory) + "\",\"该类别与当前目标语义不匹配\"],\"confidence\":70,\"suggestion\":\"切回与目标更相关的页面，或把目标写得更具体。\"}";
+        }
 
         // 更新状态并广播
         mainHandler.post(() -> {
-            distractionManager.analyzeAndCheck(result, pkg, effectiveWhitelist);
+            boolean shouldIntervene = distractionManager.analyzeAndCheck(result, pkg, interventionExemptApps);
 
             Intent aiIntent = new Intent(ACTION_AI_RESULT);
             aiIntent.putExtra("vision", result);
-            aiIntent.putExtra("activity", activity);
-            aiIntent.putExtra("is_focused", isFocused);
+            aiIntent.putExtra("activity", distractionManager.getLastAiActivity());
+            aiIntent.putExtra("is_focused", distractionManager.isLastAiFocused());
             aiIntent.putExtra("goal", focusGoal);
             aiIntent.putExtra("current_app", pkg);
             LocalBroadcastManager.getInstance(this).sendBroadcast(aiIntent);
 
-            if (!isFocused) {
+            if (shouldIntervene) {
                 handleDistraction();
             }
         });
@@ -800,6 +810,10 @@ public class FocusService extends Service {
                    .replace("\t", "\\t");
     }
 
+    private String safeExtra(String value) {
+        return value == null ? "" : value.trim();
+    }
+
     private void onScreenCaptured(Bitmap bitmap) {
         if (currentState != FocusState.FOCUSING || bitmap == null) return;
         if (isMonitoringPaused) {
@@ -816,7 +830,7 @@ public class FocusService extends Service {
         }
 
         Log.d(TAG, "截图成功，正在发送给 AI 分析...");
-        Set<String> effectiveWhitelist = getEffectiveWhitelist();
+        Set<String> interventionExemptApps = getInterventionExemptApps();
 
         // 将当前App名称传给AI，让AI结合App+屏幕内容综合判断
         String appName = getAppNameFromPackage(currentForegroundApp);
@@ -840,7 +854,7 @@ public class FocusService extends Service {
                         return;
                     }
                     // 分析并检测分心
-                    boolean isDistracted = distractionManager.analyzeAndCheck(result, currentForegroundApp, effectiveWhitelist);
+                    boolean isDistracted = distractionManager.analyzeAndCheck(result, currentForegroundApp, interventionExemptApps);
 
                     // 广播 AI 结果（包含详细信息）
                     Intent aiIntent = new Intent(ACTION_AI_RESULT);
@@ -920,11 +934,10 @@ public class FocusService extends Service {
         String distractionRecords = distractionManager.getLockScreenDistractionRecords();
         String reason = "分心次数过多，需要冷却\n深呼吸，离开屏幕休息一下。\n冷却后继续专注于: " + focusGoal;
 
-        // 【关键】通知AppMonitorService激活锁机状态，并传递白名单
+        // 【关键】通知 AppMonitorService 激活锁机状态，并传递“允许使用应用”
         AppMonitorService monitorService = AppMonitorService.getInstance();
         if (monitorService != null) {
-            // 必须调用enableLockMode传递白名单，否则看门狗无法正确判断
-            monitorService.enableLockMode(getEffectiveWhitelist(), 60000L, reason, "",
+            monitorService.enableLockMode(getInterventionExemptApps(), 60000L, reason, "",
                 distractionManager.getWarningCount(), distractionRecords);
         }
 
@@ -957,7 +970,7 @@ public class FocusService extends Service {
         boolean serviceLockActive = service != null && service.isLockScreenActive();
 
         if (serviceLockActive) {
-            String reason = "检测到离开白名单应用\n请返回专注";
+            String reason = "检测到离开允许使用应用\n请返回专注";
             launchLockUI(60000L, reason);
             Log.w(TAG, "🔒 重新启动锁机");
         } else {
@@ -1012,7 +1025,7 @@ public class FocusService extends Service {
 
     /**
      * 启动锁机Activity（纯粹启动UI，不设置状态）
-     * 注意：调用此方法前必须先调用 enableLockMode() 设置白名单
+     * 注意：调用此方法前必须先调用 enableLockMode() 设置允许使用应用
      */
     private void launchLockScreenActivity(long durationMs, String reason) {
         try {
@@ -1086,11 +1099,15 @@ public class FocusService extends Service {
 
                 String content = intent.getStringExtra(AppMonitorService.EXTRA_CONTENT);
                 String packageName = intent.getStringExtra(AppMonitorService.EXTRA_PACKAGE);
+                lastPageUrl = safeExtra(intent.getStringExtra(AppMonitorService.EXTRA_PAGE_URL));
+                lastPageDomain = safeExtra(intent.getStringExtra(AppMonitorService.EXTRA_PAGE_DOMAIN));
+                lastPageTitle = safeExtra(intent.getStringExtra(AppMonitorService.EXTRA_PAGE_TITLE));
+                lastSearchQuery = safeExtra(intent.getStringExtra(AppMonitorService.EXTRA_SEARCH_QUERY));
 
                 if (content != null && !content.isEmpty()) {
                     Log.d(TAG, "收到屏幕内容，长度: " + content.length());
                     // 使用屏幕文字内容进行 AI 分析
-                    analyzeScreenContent(content, packageName);
+                    analyzeScreenContent(content, packageName, lastPageUrl, lastPageDomain, lastPageTitle, lastSearchQuery);
                 }
             }
         };
@@ -1117,7 +1134,7 @@ public class FocusService extends Service {
     private boolean isMonitoringPaused = false;
 
     private void registerLockAndScreenReceivers() {
-        // 显示锁机接收器（当检测到非白名单应用时由AppMonitorService发送）
+        // 显示锁机接收器（当检测到离开允许使用应用时由 AppMonitorService 发送）
         showLockOverlayReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
@@ -1130,7 +1147,7 @@ public class FocusService extends Service {
 
                 // 只要锁机仍在进行中且未显示，就重新启动
                 if (!lockShowing && serviceLockActive) {
-                    String reason = "检测到离开白名单应用\n请返回专注";
+                    String reason = "检测到离开允许使用应用\n请返回专注";
                     launchLockScreenActivity(60000L, reason);
                     Log.w(TAG, "🔒 重新启动锁机");
                 }
@@ -1151,10 +1168,10 @@ public class FocusService extends Service {
                 String fullReason = (reason != null ? reason : "分心次数过多") +
                     "\n" + (advice != null ? advice : "请休息一下");
 
-                // 【关键】激活锁机状态并传递白名单
+                // 【关键】激活锁机状态并传递“允许使用应用”
                 AppMonitorService monitorService = AppMonitorService.getInstance();
                 if (monitorService != null) {
-                    monitorService.enableLockMode(getEffectiveWhitelist(), 60000L, fullReason, "", 0, "");
+                    monitorService.enableLockMode(getInterventionExemptApps(), 60000L, fullReason, "", 0, "");
                 }
 
                 // 启动锁机界面（优先悬浮窗，失败兜底 Activity）
@@ -1301,40 +1318,52 @@ public class FocusService extends Service {
      * 2. AccessibilityService获取的当前应用包名（packageName）
      * 3. AccessibilityService获取的屏幕文字内容（screenText）
      */
-    private void analyzeScreenContent(String screenText, String packageName) {
+    private void analyzeScreenContent(String screenText, String packageName,
+                                      String pageUrl, String pageDomain,
+                                      String pageTitle, String searchQuery) {
         if (!tryAcquireTextAnalysisSlot(screenText, packageName)) {
             return;
         }
 
-        Set<String> effectiveWhitelist = getEffectiveWhitelist();
+        Set<String> interventionExemptApps = getInterventionExemptApps();
+        String safePackageName = packageName == null ? "" : packageName;
         // 获取应用名称
-        String appName = getAppNameFromPackage(packageName);
+        String appName = getAppNameFromPackage(safePackageName);
+        FocusGoalInterpreter.GoalProfile goalProfile = FocusGoalInterpreter.analyzeGoal(focusGoal);
+        String appCategory = FocusGoalInterpreter.classifyApp(safePackageName, appName);
+        boolean isSystemExempt = isSystemExemptApp(safePackageName);
+        boolean isUserAllowed = isUserAllowedApp(safePackageName);
+        String safePageUrl = safeExtra(pageUrl);
+        String safePageDomain = safeExtra(pageDomain);
+        String safePageTitle = safeExtra(pageTitle);
+        String safeSearchQuery = safeExtra(searchQuery);
 
-        // 只有系统/用户显式白名单直接跳过 AI；任务相关应用仍需看内容，避免浏览器/聊天应用被永久放过
-        boolean isInHardWhitelist = whitelist.contains(packageName);
-        boolean isGoalRelevantApp = goalRelevantApps.contains(packageName);
+        // 只有系统必要应用直接跳过 AI；用户显式允许应用仍需看内容，只是在干预时放行
+        boolean isInHardWhitelist = isSystemExempt;
+        boolean isGoalRelevantApp = goalRelevantApps.contains(safePackageName);
         if (isInHardWhitelist) {
-            Log.d(TAG, "✅ 应用在白名单中，跳过AI分析: " + appName);
+            Log.d(TAG, "✅ 系统必要应用，跳过AI分析: " + appName);
             // 直接广播结果，不调用AI
-            String result = "{\"conclusion\":\"YES\",\"behavior\":\"使用白名单应用\",\"reason\":\"符合目标：该应用属于系统或用户显式允许的白名单，当前阶段默认视为任务相关操作。\",\"evidence\":[\"应用命中硬白名单\"],\"confidence\":100,\"suggestion\":\"继续当前任务，如页面内容明显偏离可调整白名单。\"}";
+            String result = "{\"conclusion\":\"YES\",\"behavior\":\"使用系统必要应用\",\"reason\":\"符合目标：该应用属于系统必要流程（如设置、时钟、日历等），本次不作为分心处理。\",\"evidence\":[\"应用命中系统硬豁免名单\"],\"confidence\":100,\"suggestion\":\"完成必要操作后继续当前任务。\"}";
             mainHandler.post(() -> {
                 releaseTextAnalysisSlot();
-                distractionManager.analyzeAndCheck(result, packageName, effectiveWhitelist);
+                distractionManager.analyzeAndCheck(result, safePackageName, interventionExemptApps);
                 Intent aiIntent = new Intent(ACTION_AI_RESULT);
                 aiIntent.putExtra("vision", result);
-                aiIntent.putExtra("activity", "使用白名单应用: " + appName);
+                aiIntent.putExtra("activity", "使用系统必要应用: " + appName);
                 aiIntent.putExtra("is_focused", true);
                 aiIntent.putExtra("goal", focusGoal);
+                aiIntent.putExtra("current_app", safePackageName);
                 LocalBroadcastManager.getInstance(FocusService.this).sendBroadcast(aiIntent);
             });
             return;
         }
 
         // 判断是否为系统应用/桌面
-        boolean isLauncher = packageName.contains("launcher") || packageName.contains("home") ||
-                            packageName.contains("桌面") || appName.contains("桌面");
-        boolean isSystemUi = packageName.contains("systemui") || packageName.contains("settings") ||
-                            packageName.contains("inputmethod") || packageName.contains("keyboard");
+        boolean isLauncher = safePackageName.contains("launcher") || safePackageName.contains("home") ||
+                            safePackageName.contains("桌面") || appName.contains("桌面");
+        boolean isSystemUi = safePackageName.contains("systemui") || safePackageName.contains("settings") ||
+                            safePackageName.contains("inputmethod") || safePackageName.contains("keyboard");
         boolean appJustSwitched = System.currentTimeMillis() - lastForegroundSwitchTime < APP_SWITCH_GRACE_MS;
 
         // 提取屏幕特征
@@ -1345,21 +1374,70 @@ public class FocusService extends Service {
                          screenText.contains("import") || screenText.contains("return");
         boolean hasChat = screenText.contains("发送") || screenText.contains("消息") ||
                          screenText.contains("聊天") || screenText.contains("评论");
+        boolean hasMath = containsAny(screenText, "计算器", "总计", "结果", "函数", "平方", "根号", "sin", "cos", "tan");
         boolean hasDocument = containsAny(screenText, "文档", "word", "excel", "ppt", "markdown", "notion", "会议纪要");
         boolean hasLearning = containsAny(screenText, "课程", "论文", "题目", "背单词", "lecture", "readme", "stack overflow");
         boolean hasEntertainment = containsAny(screenText, "推荐", "直播", "短视频", "点赞", "评论区", "热搜", "for you");
         boolean hasShopping = containsAny(screenText, "购物车", "立即购买", "下单", "优惠券", "商品详情");
 
+        FocusLocalRuleEngine.RuleAssessment localAssessment =
+            FocusLocalRuleEngine.analyze(
+                focusGoal,
+                safePackageName,
+                appName,
+                screenText,
+                safePageDomain,
+                safePageTitle,
+                safeSearchQuery
+            );
+        if (localAssessment != null) {
+            String result = localAssessment.toJsonString();
+            Log.d(TAG, "命中本地强规则，跳过AI: " + result);
+            mainHandler.post(() -> {
+                releaseTextAnalysisSlot();
+                boolean isDistracted = distractionManager.analyzeAndCheck(result, safePackageName, interventionExemptApps);
+
+                Intent aiIntent = new Intent(ACTION_AI_RESULT);
+                aiIntent.putExtra("vision", result);
+                aiIntent.putExtra("activity", distractionManager.getLastAiActivity());
+                aiIntent.putExtra("is_focused", distractionManager.isLastAiFocused());
+                aiIntent.putExtra("goal", focusGoal);
+                aiIntent.putExtra("current_app", safePackageName);
+                LocalBroadcastManager.getInstance(FocusService.this).sendBroadcast(aiIntent);
+
+                if (isDistracted) {
+                    handleDistraction();
+                }
+            });
+            return;
+        }
+
         // 构建JSON结构化输入
         String inputJson = "{\n" +
             "  \"task_goal\": \"" + escapeJson(focusGoal) + "\",\n" +
+            "  \"goal_profile\": {\n" +
+            "    \"goal_type\": \"" + escapeJson(goalProfile.goalType) + "\",\n" +
+            "    \"scope\": \"" + escapeJson(goalProfile.scope) + "\",\n" +
+            "    \"normalized_intent\": \"" + escapeJson(goalProfile.normalizedIntent) + "\",\n" +
+            "    \"allowed_categories\": " + toJsonArray(goalProfile.allowedCategories) + ",\n" +
+            "    \"discouraged_categories\": " + toJsonArray(goalProfile.discouragedCategories) + ",\n" +
+            "    \"special_rule\": \"" + escapeJson(goalProfile.ruleSummary) + "\"\n" +
+            "  },\n" +
             "  \"current_app\": {\n" +
             "    \"name\": \"" + escapeJson(appName) + "\",\n" +
-            "    \"package\": \"" + packageName + "\",\n" +
+            "    \"package\": \"" + safePackageName + "\",\n" +
+            "    \"category\": \"" + escapeJson(appCategory) + "\",\n" +
             "    \"is_launcher\": " + isLauncher + ",\n" +
             "    \"is_system_ui\": " + isSystemUi + ",\n" +
-            "    \"is_in_hard_whitelist\": " + isInHardWhitelist + ",\n" +
+            "    \"is_system_exempt\": " + isSystemExempt + ",\n" +
+            "    \"is_user_allowed_app\": " + isUserAllowed + ",\n" +
             "    \"is_goal_relevant_app\": " + isGoalRelevantApp + "\n" +
+            "  },\n" +
+            "  \"page_context\": {\n" +
+            "    \"page_url\": \"" + escapeJson(safePageUrl) + "\",\n" +
+            "    \"page_domain\": \"" + escapeJson(safePageDomain) + "\",\n" +
+            "    \"page_title\": \"" + escapeJson(safePageTitle) + "\",\n" +
+            "    \"search_query\": \"" + escapeJson(safeSearchQuery) + "\"\n" +
             "  },\n" +
             "  \"recent_context\": {\n" +
             "    \"app_just_switched\": " + appJustSwitched + ",\n" +
@@ -1368,6 +1446,7 @@ public class FocusService extends Service {
             "  \"screen_features\": {\n" +
             "    \"has_code\": " + hasCode + ",\n" +
             "    \"has_chat\": " + hasChat + ",\n" +
+            "    \"has_math\": " + hasMath + ",\n" +
             "    \"has_document\": " + hasDocument + ",\n" +
             "    \"has_learning\": " + hasLearning + ",\n" +
             "    \"has_entertainment\": " + hasEntertainment + ",\n" +
@@ -1380,11 +1459,15 @@ public class FocusService extends Service {
         String prompt = "你是专注力判断助手。根据以下JSON输入判断用户是否在专注任务。\n\n" +
                        "【输入】\n" + inputJson + "\n\n" +
                        "【判断规则（按优先级）】\n" +
-                       "1. is_in_hard_whitelist=true → YES\n" +
+                       "1. is_system_exempt=true → YES\n" +
                        "2. is_system_ui=true 或 is_launcher=true → YES\n" +
                        "3. app_just_switched=true、界面像加载页/权限页/通知页、证据不足 → UNSURE\n" +
                        "4. 应用或内容与任务目标明显相关 → YES\n" +
-                       "5. 只有当前行为与任务明显无关，且是娱乐/社交闲逛/购物/纯聊天时 → NO\n\n" +
+                       "5. 只有当前行为与任务明显无关，且是娱乐/社交闲逛/购物/纯聊天时 → NO\n" +
+                       "6. is_user_allowed_app=true 只表示该应用被用户设为“专注期间允许使用”，不代表它自动命中目标；仍然要按页面内容和目标语义判断 YES/NO。\n" +
+                       "7. 浏览器场景优先参考 page_domain/page_title/search_query；知识站点、搜索结果、文档标题通常更接近工作学习，购物/娱乐/社交站点通常更接近分心。\n" +
+                       "8. 聊天场景要区分工作沟通和闲聊：需求、会议、文档、项目、作业、论文等偏 YES；吃饭、周末、开黑、追剧、闲聊寒暄等偏 NO。\n" +
+                       "9. 不要把“玩手机/刷手机/休息”理解成任何手机操作都算命中目标；例如 goal_type=generic_leisure 且 current_app.category=utility_calc 时，通常应判 NO，除非目标明确提到计算或记账。\n\n" +
                        "【重要】conclusion和reason必须一致！\n" +
                        "- 如果conclusion=YES，reason必须说\"符合目标\"\n" +
                        "- 如果conclusion=NO，reason必须说\"不符合目标\"\n" +
@@ -1418,7 +1501,7 @@ public class FocusService extends Service {
                         return;
                     }
 
-                    boolean isDistracted = distractionManager.analyzeAndCheck(result, packageName, effectiveWhitelist);
+                    boolean isDistracted = distractionManager.analyzeAndCheck(result, safePackageName, interventionExemptApps);
 
                     // 广播 AI 结果
                     Intent aiIntent = new Intent(ACTION_AI_RESULT);
@@ -1426,7 +1509,7 @@ public class FocusService extends Service {
                     aiIntent.putExtra("activity", distractionManager.getLastAiActivity());
                     aiIntent.putExtra("is_focused", distractionManager.isLastAiFocused());
                     aiIntent.putExtra("goal", focusGoal);
-                    aiIntent.putExtra("current_app", packageName);
+                    aiIntent.putExtra("current_app", safePackageName);
                     LocalBroadcastManager.getInstance(FocusService.this).sendBroadcast(aiIntent);
 
                     if (isDistracted) {
@@ -1449,7 +1532,7 @@ public class FocusService extends Service {
                     aiIntent.putExtra("vision", "AI 分析失败: " + error);
                     aiIntent.putExtra("activity", "分析失败");
                     aiIntent.putExtra("is_focused", true);
-                    aiIntent.putExtra("current_app", packageName);
+                    aiIntent.putExtra("current_app", safePackageName);
                     LocalBroadcastManager.getInstance(FocusService.this).sendBroadcast(aiIntent);
                 });
             }
@@ -1464,47 +1547,27 @@ public class FocusService extends Service {
         Log.d(TAG, "前台应用切换: " + packageName);
     }
 
-    // ==================== 白名单管理 ====================
+    // ==================== 允许使用应用管理 ====================
 
     private void loadWhitelist() {
-        SharedPreferences prefs = getSharedPreferences("MindFlowPrefs", MODE_PRIVATE);
-        whitelist = new HashSet<>(prefs.getStringSet("whitelist", new HashSet<>()));
-        whitelist = sanitizeWhitelist(whitelist);
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        systemExemptApps.clear();
+        systemExemptApps.addAll(buildSystemExemptApps());
 
-        // 默认白名单：系统必要应用
-        whitelist.add(getPackageName()); // 自身
-        whitelist.add("com.android.settings"); // 设置
-        whitelist.add("com.android.contacts"); // 联系人
-        whitelist.add("com.android.mms"); // 信息
-        whitelist.add("com.android.messaging"); // 信息（另一个包名）
-        whitelist.add("com.android.calendar"); // 日历
-        whitelist.add("com.android.deskclock"); // 时钟
-        whitelist.add("com.google.android.deskclock"); // Google时钟
-        // 华为/荣耀
-        whitelist.add("com.huawei.contacts"); // 华为联系人
-        whitelist.add("com.huawei.message"); // 华为信息
-        whitelist.add("com.huawei.calendar"); // 华为日历
-        whitelist.add("com.huawei.deskclock"); // 华为时钟
-        // 小米
-        whitelist.add("com.miui.contacts"); // 小米联系人
-        whitelist.add("com.xiaomi.calendar"); // 小米日历
-        whitelist.add("com.android.deskclock"); // 小米时钟
-
-        // 再次清洗（确保只保留可启动应用包名）
-        whitelist = sanitizeWhitelist(whitelist);
-        prefs.edit().putStringSet("whitelist", new HashSet<>(whitelist)).apply();
+        userAllowedApps.clear();
+        userAllowedApps.addAll(sanitizeUserAllowedApps(prefs.getStringSet(KEY_WHITELIST, new HashSet<>())));
+        prefs.edit().putStringSet(KEY_WHITELIST, new HashSet<>(userAllowedApps)).apply();
     }
 
     public void updateWhitelist(Set<String> newWhitelist) {
-        this.whitelist = sanitizeWhitelist(newWhitelist);
-        whitelist.add(getPackageName());
-        whitelist.add("com.android.settings");
+        userAllowedApps.clear();
+        userAllowedApps.addAll(sanitizeUserAllowedApps(newWhitelist));
         if (distractionManager != null) {
-            distractionManager.setWhitelist(getEffectiveWhitelist());
+            distractionManager.setInterventionExemptApps(getInterventionExemptApps());
         }
 
-        SharedPreferences prefs = getSharedPreferences("MindFlowPrefs", MODE_PRIVATE);
-        prefs.edit().putStringSet("whitelist", whitelist).apply();
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        prefs.edit().putStringSet(KEY_WHITELIST, new HashSet<>(userAllowedApps)).apply();
     }
 
     private Set<String> sanitizeWhitelist(Set<String> input) {
@@ -1534,13 +1597,40 @@ public class FocusService extends Service {
         return out;
     }
 
+    private Set<String> sanitizeUserAllowedApps(Set<String> input) {
+        Set<String> cleaned = sanitizeWhitelist(input);
+        cleaned.remove(getPackageName());
+        cleaned.removeAll(buildSystemExemptApps());
+        return cleaned;
+    }
+
+    private Set<String> buildSystemExemptApps() {
+        Set<String> apps = new HashSet<>();
+        apps.add(getPackageName());
+        apps.add("com.android.settings");
+        apps.add("com.android.calendar");
+        apps.add("com.android.deskclock");
+        apps.add("com.google.android.deskclock");
+        apps.add("com.huawei.calendar");
+        apps.add("com.huawei.deskclock");
+        apps.add("com.xiaomi.calendar");
+        return apps;
+    }
+
+    private boolean isSystemExemptApp(String packageName) {
+        return packageName != null && !packageName.isEmpty() && systemExemptApps.contains(packageName);
+    }
+
+    private boolean isUserAllowedApp(String packageName) {
+        return packageName != null && !packageName.isEmpty() && userAllowedApps.contains(packageName);
+    }
+
     public Set<String> getWhitelist() {
-        return new HashSet<>(whitelist);
+        return new HashSet<>(userAllowedApps);
     }
 
     /**
-     * 根据专注目标智能添加白名单
-     * 如：任务是"用微信工作"，则微信自动进白名单
+     * 根据专注目标识别“可能相关”的应用，用于给 AI 提供上下文，但不自动视为命中目标
      */
     private void rebuildGoalRelevantApps() {
         goalRelevantApps.clear();
@@ -1556,31 +1646,31 @@ public class FocusService extends Service {
         // 微信相关
         if (lowerGoal.contains("微信") || lowerGoal.contains("wechat")) {
             smartApps.add("com.tencent.mm");
-            Log.d(TAG, "智能白名单: 添加微信");
+            Log.d(TAG, "任务相关应用: 添加微信");
         }
 
         // QQ相关
         if (lowerGoal.contains("qq")) {
             smartApps.add("com.tencent.mobileqq");
-            Log.d(TAG, "智能白名单: 添加QQ");
+            Log.d(TAG, "任务相关应用: 添加QQ");
         }
 
         // 钉钉相关
         if (lowerGoal.contains("钉钉") || lowerGoal.contains("dingtalk")) {
             smartApps.add("com.alibaba.android.rimet");
-            Log.d(TAG, "智能白名单: 添加钉钉");
+            Log.d(TAG, "任务相关应用: 添加钉钉");
         }
 
         // 飞书相关
         if (lowerGoal.contains("飞书") || lowerGoal.contains("lark")) {
             smartApps.add("com.ss.android.lark");
-            Log.d(TAG, "智能白名单: 添加飞书");
+            Log.d(TAG, "任务相关应用: 添加飞书");
         }
 
         // 企业微信
         if (lowerGoal.contains("企业微信") || lowerGoal.contains("企微")) {
             smartApps.add("com.tencent.wework");
-            Log.d(TAG, "智能白名单: 添加企业微信");
+            Log.d(TAG, "任务相关应用: 添加企业微信");
         }
 
         // 浏览器相关
@@ -1590,7 +1680,7 @@ public class FocusService extends Service {
             smartApps.add("com.miui.browser");
             smartApps.add("com.vivo.browser");
             smartApps.add("com.oppo.browser");
-            Log.d(TAG, "智能白名单: 添加浏览器");
+            Log.d(TAG, "任务相关应用: 添加浏览器");
         }
 
         // 笔记相关
@@ -1598,7 +1688,7 @@ public class FocusService extends Service {
             smartApps.add("notion.id");
             smartApps.add("com.evernote");
             smartApps.add("com.miui.notes");
-            Log.d(TAG, "智能白名单: 添加笔记应用");
+            Log.d(TAG, "任务相关应用: 添加笔记应用");
         }
 
         // 邮件相关
@@ -1606,16 +1696,16 @@ public class FocusService extends Service {
             smartApps.add("com.google.android.gm");
             smartApps.add("com.netease.mail");
             smartApps.add("com.tencent.androidqqmail");
-            Log.d(TAG, "智能白名单: 添加邮件应用");
+            Log.d(TAG, "任务相关应用: 添加邮件应用");
         }
 
         return smartApps;
     }
 
-    private Set<String> getEffectiveWhitelist() {
-        Set<String> effective = new HashSet<>(whitelist);
-        effective.addAll(goalRelevantApps);
-        return effective;
+    private Set<String> getInterventionExemptApps() {
+        Set<String> allowed = new HashSet<>(systemExemptApps);
+        allowed.addAll(userAllowedApps);
+        return allowed;
     }
 
     private synchronized boolean tryAcquireTextAnalysisSlot(String screenText, String packageName) {
@@ -1693,6 +1783,21 @@ public class FocusService extends Service {
             }
         }
         return false;
+    }
+
+    private String toJsonArray(String[] values) {
+        if (values == null || values.length == 0) {
+            return "[]";
+        }
+        StringBuilder builder = new StringBuilder("[");
+        for (int i = 0; i < values.length; i++) {
+            if (i > 0) {
+                builder.append(", ");
+            }
+            builder.append("\"").append(escapeJson(values[i])).append("\"");
+        }
+        builder.append("]");
+        return builder.toString();
     }
 
     // ==================== 通知 ====================

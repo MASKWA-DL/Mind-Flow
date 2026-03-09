@@ -850,7 +850,7 @@ public class SessionFragment extends Fragment {
             }
         }
 
-        tvWhitelistCount.setText("已选择 " + cleaned.size() + " 个应用");
+        tvWhitelistCount.setText("已选择 " + cleaned.size() + " 个允许使用应用");
     }
 
     private void addCurrentAppToWhitelist() {
@@ -871,7 +871,7 @@ public class SessionFragment extends Fragment {
 
         // 过滤进程名形式：com.xxx:process
         if (currentPkg.contains(":")) {
-            Toast.makeText(getContext(), "当前获取到的是进程标识，无法加入白名单", Toast.LENGTH_SHORT).show();
+            Toast.makeText(getContext(), "当前获取到的是进程标识，无法加入允许使用列表", Toast.LENGTH_SHORT).show();
             return;
         }
 
@@ -879,7 +879,7 @@ public class SessionFragment extends Fragment {
         try {
             android.content.Intent launch = getContext().getPackageManager().getLaunchIntentForPackage(currentPkg);
             if (launch == null) {
-                Toast.makeText(getContext(), "该条目不是可启动应用，无法加入白名单", Toast.LENGTH_SHORT).show();
+                Toast.makeText(getContext(), "该条目不是可启动应用，无法加入允许使用列表", Toast.LENGTH_SHORT).show();
                 return;
             }
         } catch (Exception e) {
@@ -896,16 +896,16 @@ public class SessionFragment extends Fragment {
             // 使用包名
         }
 
-        // 添加到白名单
+        // 添加到允许使用列表
         android.content.SharedPreferences prefs = getContext().getSharedPreferences(PREF_NAME, android.content.Context.MODE_PRIVATE);
         java.util.Set<String> whitelist = new java.util.HashSet<>(prefs.getStringSet("whitelist", new java.util.HashSet<>()));
 
         if (whitelist.contains(currentPkg)) {
-            Toast.makeText(getContext(), appName + " 已在白名单中", Toast.LENGTH_SHORT).show();
+            Toast.makeText(getContext(), appName + " 已在允许使用列表中", Toast.LENGTH_SHORT).show();
         } else {
             whitelist.add(currentPkg);
             prefs.edit().putStringSet("whitelist", whitelist).apply();
-            Toast.makeText(getContext(), "已添加 " + appName + " 到白名单", Toast.LENGTH_SHORT).show();
+            Toast.makeText(getContext(), "已添加 " + appName + " 到允许使用列表", Toast.LENGTH_SHORT).show();
             updateWhitelistCount();
         }
     }

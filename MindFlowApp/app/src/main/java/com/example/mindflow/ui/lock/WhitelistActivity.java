@@ -84,12 +84,12 @@ public class WhitelistActivity extends AppCompatActivity {
             rvApps.setVisibility(View.INVISIBLE);
         }
 
-        // 1. 加载本地已保存的白名单
+        // 1. 加载本地已保存的允许使用应用
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         Set<String> savedWhitelist = prefs.getStringSet(KEY_WHITELIST, new HashSet<>());
         Set<String> sanitizedSaved = sanitizeWhitelist(savedWhitelist);
 
-        // 首次进入：默认加入电话/短信相关应用到白名单（默认打勾）
+        // 首次进入：默认加入电话/短信相关应用到允许使用列表（默认打勾）
         boolean defaultAdded = prefs.getBoolean(KEY_DEFAULT_COMM_WHITELIST_ADDED, false);
         if (!defaultAdded) {
             HashSet<String> merged = new HashSet<>(sanitizedSaved);
@@ -154,8 +154,8 @@ public class WhitelistActivity extends AppCompatActivity {
             // 重要：必须创建新的HashSet，避免SharedPreferences的可变引用坑
             Set<String> saveSet = sanitizeWhitelist(selectedApps);
             prefs.edit().putStringSet(KEY_WHITELIST, new HashSet<>(saveSet)).apply();
-            android.util.Log.d("WhitelistActivity", "白名单已保存: " + saveSet.size() + " 个应用, 内容: " + saveSet);
-            Toast.makeText(this, "白名单已更新 (" + saveSet.size() + " 个应用)", Toast.LENGTH_SHORT).show();
+            android.util.Log.d("WhitelistActivity", "允许使用应用已保存: " + saveSet.size() + " 个应用, 内容: " + saveSet);
+            Toast.makeText(this, "允许使用应用已更新 (" + saveSet.size() + " 个应用)", Toast.LENGTH_SHORT).show();
             finish();
         });
     }

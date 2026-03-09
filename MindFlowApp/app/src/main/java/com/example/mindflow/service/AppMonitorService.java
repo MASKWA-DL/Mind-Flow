@@ -30,6 +30,8 @@ import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 
 import java.util.HashSet;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 无障碍服务 - 实时监控前台应用和屏幕内容
@@ -49,12 +51,21 @@ public class AppMonitorService extends AccessibilityService {
     public static final String ACTION_SERVICE_STATUS = "com.example.mindflow.SERVICE_STATUS";
     public static final String EXTRA_CONTENT = "content";
     public static final String EXTRA_PACKAGE = "package_name";
+    public static final String EXTRA_PAGE_URL = "page_url";
+    public static final String EXTRA_PAGE_DOMAIN = "page_domain";
+    public static final String EXTRA_PAGE_TITLE = "page_title";
+    public static final String EXTRA_SEARCH_QUERY = "search_query";
     public static final String EXTRA_STATUS = "status";
     public static final String EXTRA_METHOD = "method";
+    private static final Pattern DOMAIN_PATTERN = Pattern.compile("\\b(?:[a-z0-9-]+\\.)+[a-z]{2,}\\b");
     
     private static AppMonitorService instance;
     private String currentPackageName = "";
     private String lastScreenContent = "";
+    private String lastPageUrl = "";
+    private String lastPageDomain = "";
+    private String lastPageTitle = "";
+    private String lastSearchQuery = "";
     private long lastContentTime = 0;
     private int contentReadCount = 0;
     private static final long CONTENT_INTERVAL = 3000; // 3秒读取一次
@@ -88,6 +99,58 @@ public class AppMonitorService extends AccessibilityService {
     
     public static AppMonitorService getInstance() {
         return instance;
+    }
+
+    private static final class PageContextSnapshot {
+        final String pageUrl;
+        final String pageDomain;
+        final String pageTitle;
+        final String searchQuery;
+
+        PageContextSnapshot(String pageUrl, String pageDomain, String pageTitle, String searchQuery) {
+            this.pageUrl = pageUrl;
+            this.pageDomain = pageDomain;
+            this.pageTitle = pageTitle;
+            this.searchQuery = searchQuery;
+        }
+    }
+
+    private static final class PageContextCollector {
+        String urlCandidate = "";
+        String titleCandidate = "";
+        String searchQuery = "";
+
+        void maybeCapture(String viewId, CharSequence value, boolean editable) {
+            if (value == null) return;
+            String text = value.toString().trim();
+            if (text.isEmpty()) return;
+
+            String lowerId = viewId == null ? "" : viewId.toLowerCase();
+            String lowerText = text.toLowerCase();
+
+            if (urlCandidate.isEmpty() && looksLikeUrl(text)) {
+                urlCandidate = text;
+            }
+            if (containsAny(lowerId, "url", "address", "omnibox", "location", "search_box")) {
+                if (looksLikeUrl(text) || lowerText.contains(".com") || lowerText.contains(".cn")
+                        || lowerText.contains(".org") || lowerText.contains(".net")) {
+                    urlCandidate = text;
+                } else if (searchQuery.isEmpty()) {
+                    searchQuery = text;
+                }
+            }
+            if (containsAny(lowerId, "title", "toolbar", "web_title", "tab_title")
+                    && titleCandidate.isEmpty() && text.length() >= 4 && !looksLikeUrl(text)) {
+                titleCandidate = text;
+            }
+            if (editable && searchQuery.isEmpty() && !looksLikeUrl(text) && text.length() >= 2) {
+                searchQuery = text;
+            }
+            if (titleCandidate.isEmpty() && text.length() >= 8 && !looksLikeUrl(text)
+                    && !editable && !containsAny(lowerId, "button", "input", "edit")) {
+                titleCandidate = text;
+            }
+        }
     }
     
     public static boolean isRunning() {
@@ -237,18 +300,28 @@ public class AppMonitorService extends AccessibilityService {
         if (rootNode == null) return;
         
         StringBuilder content = new StringBuilder();
-        extractAllText(rootNode, content);
+        PageContextCollector collector = new PageContextCollector();
+        extractAllText(rootNode, content, collector);
+        PageContextSnapshot snapshot = buildPageContextSnapshot(content.toString(), collector);
         rootNode.recycle();
         
         String screenContent = content.toString().trim();
         if (screenContent.length() > 10 && !screenContent.equals(lastScreenContent)) {
             lastScreenContent = screenContent;
+            lastPageUrl = snapshot.pageUrl;
+            lastPageDomain = snapshot.pageDomain;
+            lastPageTitle = snapshot.pageTitle;
+            lastSearchQuery = snapshot.searchQuery;
             contentReadCount++;
             
             // 广播屏幕内容给 FocusService
             Intent intent = new Intent(ACTION_SCREEN_CONTENT);
             intent.putExtra(EXTRA_CONTENT, screenContent);
             intent.putExtra(EXTRA_PACKAGE, currentPackageName);
+            intent.putExtra(EXTRA_PAGE_URL, lastPageUrl);
+            intent.putExtra(EXTRA_PAGE_DOMAIN, lastPageDomain);
+            intent.putExtra(EXTRA_PAGE_TITLE, lastPageTitle);
+            intent.putExtra(EXTRA_SEARCH_QUERY, lastSearchQuery);
             intent.putExtra("content_length", screenContent.length());
             LocalBroadcastManager.getInstance(this).sendBroadcast(intent);
             
@@ -260,22 +333,40 @@ public class AppMonitorService extends AccessibilityService {
      * 递归提取所有文字
      */
     private void extractAllText(AccessibilityNodeInfo node, StringBuilder sb) {
+        extractAllText(node, sb, null);
+    }
+
+    private void extractAllText(AccessibilityNodeInfo node, StringBuilder sb, PageContextCollector collector) {
         if (node == null) return;
         
         CharSequence text = node.getText();
         if (text != null && text.length() > 0) {
             sb.append(text).append(" ");
         }
+
+        if (collector != null) {
+            collector.maybeCapture(node.getViewIdResourceName(), text, node.isEditable());
+        }
         
         CharSequence desc = node.getContentDescription();
         if (desc != null && desc.length() > 0) {
             sb.append(desc).append(" ");
         }
+
+        if (collector != null) {
+            collector.maybeCapture(node.getViewIdResourceName(), desc, node.isEditable());
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                collector.maybeCapture(node.getViewIdResourceName(), node.getHintText(), true);
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                collector.maybeCapture(node.getViewIdResourceName(), node.getPaneTitle(), false);
+            }
+        }
         
         for (int i = 0; i < node.getChildCount(); i++) {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child != null) {
-                extractAllText(child, sb);
+                extractAllText(child, sb, collector);
                 child.recycle();
             }
         }
@@ -289,9 +380,114 @@ public class AppMonitorService extends AccessibilityService {
         if (rootNode == null) return "";
         
         StringBuilder content = new StringBuilder();
-        extractAllText(rootNode, content);
+        PageContextCollector collector = new PageContextCollector();
+        extractAllText(rootNode, content, collector);
+        PageContextSnapshot snapshot = buildPageContextSnapshot(content.toString(), collector);
         rootNode.recycle();
+        lastPageUrl = snapshot.pageUrl;
+        lastPageDomain = snapshot.pageDomain;
+        lastPageTitle = snapshot.pageTitle;
+        lastSearchQuery = snapshot.searchQuery;
         return content.toString().trim();
+    }
+
+    public String getLastPageUrl() {
+        return lastPageUrl;
+    }
+
+    public String getLastPageDomain() {
+        return lastPageDomain;
+    }
+
+    public String getLastPageTitle() {
+        return lastPageTitle;
+    }
+
+    public String getLastSearchQuery() {
+        return lastSearchQuery;
+    }
+
+    private PageContextSnapshot buildPageContextSnapshot(String screenContent, PageContextCollector collector) {
+        String pageUrl = safeText(collector != null ? collector.urlCandidate : "");
+        String pageTitle = safeText(collector != null ? collector.titleCandidate : "");
+        String searchQuery = safeText(collector != null ? collector.searchQuery : "");
+        String pageDomain = extractDomain(pageUrl);
+
+        String normalizedScreen = safeText(screenContent).toLowerCase();
+        if (pageDomain.isEmpty()) {
+            pageDomain = extractDomain(screenContent);
+        }
+        if (pageTitle.isEmpty() && !normalizedScreen.isEmpty()) {
+            pageTitle = guessTitleFromContent(screenContent);
+        }
+        if (searchQuery.isEmpty() && containsAny(normalizedScreen, "搜索", "百度一下", "google search")) {
+            searchQuery = guessSearchQueryFromContent(screenContent);
+        }
+
+        return new PageContextSnapshot(pageUrl, pageDomain, pageTitle, searchQuery);
+    }
+
+    private static String guessTitleFromContent(String screenContent) {
+        if (screenContent == null || screenContent.trim().isEmpty()) return "";
+        String[] parts = screenContent.trim().split("\\s+");
+        StringBuilder title = new StringBuilder();
+        for (String part : parts) {
+            if (part.length() < 2 || looksLikeUrl(part)) {
+                continue;
+            }
+            if (title.length() > 0) {
+                title.append(' ');
+            }
+            title.append(part);
+            if (title.length() >= 40) {
+                break;
+            }
+        }
+        return title.toString().trim();
+    }
+
+    private static String guessSearchQueryFromContent(String screenContent) {
+        if (screenContent == null || screenContent.trim().isEmpty()) return "";
+        String cleaned = screenContent.replace('\n', ' ').trim();
+        if (cleaned.length() <= 40) {
+            return cleaned;
+        }
+        return cleaned.substring(0, 40).trim();
+    }
+
+    private static String extractDomain(String raw) {
+        if (raw == null || raw.trim().isEmpty()) return "";
+        Matcher matcher = DOMAIN_PATTERN.matcher(raw.toLowerCase());
+        while (matcher.find()) {
+            String domain = matcher.group();
+            if (domain.contains("android") || domain.contains("miui") || domain.contains("huawei")) {
+                continue;
+            }
+            return domain;
+        }
+        return "";
+    }
+
+    private static boolean looksLikeUrl(String text) {
+        if (text == null || text.trim().isEmpty()) return false;
+        String lower = text.trim().toLowerCase();
+        return lower.startsWith("http://") || lower.startsWith("https://")
+                || lower.contains(".com") || lower.contains(".cn")
+                || lower.contains(".org") || lower.contains(".net");
+    }
+
+    private static String safeText(String text) {
+        return text == null ? "" : text.trim();
+    }
+
+    private static boolean containsAny(String text, String... keywords) {
+        if (text == null || text.isEmpty()) return false;
+        for (String keyword : keywords) {
+            if (text.contains(keyword.toLowerCase())) {
+                return true;
+            }
+        }
+        return false;
     }
     
     @Override

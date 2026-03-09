@@ -5,6 +5,7 @@ import android.util.Base64;
 import android.util.Log;
 
 import com.example.mindflow.BuildConfig;
+import com.example.mindflow.utils.FocusGoalInterpreter;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -97,13 +98,16 @@ public class GlmApiService {
         return "你是专注度分析助手，请根据截图判断用户是否偏离任务。\n\n" +
                 appInfo +
                 "用户专注目标：【" + currentFocusGoal + "】\n\n" +
+                FocusGoalInterpreter.buildGoalRuleBlock(currentFocusGoal) + "\n" +
                 "判断要求：\n" +
                 "1. 优先看截图里的实际内容，而不是只看 App 名。\n" +
                 "2. 如果内容明显与目标相关，返回 YES。\n" +
                 "3. 如果内容明显是娱乐、闲聊、购物、无关浏览，返回 NO。\n" +
                 "4. 如果刚切页面、截图信息太少、界面在加载、被弹窗遮挡，返回 UNSURE。\n" +
-                "5. reason 必须详细说明：目标是什么、截图里看到什么、为什么符合/不符合。\n" +
-                "6. evidence 必须给 1-3 条简短证据。\n";
+                "5. 特别注意：像“玩手机/刷手机/休息”这类目标，只覆盖休闲娱乐行为，不覆盖计算器、支付、工作学习、设置等工具型操作，除非目标里明确写了这些操作。\n" +
+                "6. 如果截图在聊天应用里，要区分工作沟通和闲聊；如果在浏览器里，要优先看站点类型和页面标题。\n" +
+                "7. reason 必须详细说明：目标是什么、截图里看到什么、为什么符合/不符合。\n" +
+                "8. evidence 必须给 1-3 条简短证据。\n";
     }
 
     private static String buildTextSystemPrompt() {
@@ -113,8 +117,11 @@ public class GlmApiService {
                 "2. 与任务直接相关、为任务服务、或合理的过渡操作，应判 YES。\n" +
                 "3. 明显与任务无关的娱乐、购物、闲聊、信息流刷屏，应判 NO。\n" +
                 "4. 如果信息不足、刚切换页面、仍在加载、权限弹窗、通知遮挡，请判 UNSURE。\n" +
-                "5. reason 必须写详细，至少覆盖：任务目标、当前行为、关键证据、最终结论。\n" +
-                "6. evidence 必须给 1-3 条来自当前页面的关键证据。\n";
+                "5. 浏览器场景优先参考页面域名、标题、搜索词；知识/文档/搜索结果更可能相关，购物/社交/娱乐站点更可能无关。\n" +
+                "6. 聊天场景要区分工作沟通和闲聊：需求、会议、项目、作业、论文、文档、客户等更偏相关；吃饭、周末、开黑、追剧、寒暄更偏无关。\n" +
+                "7. 像“玩手机/刷手机/休息”这类泛娱乐目标，不要理解成“手机上的任何操作都算命中目标”；计算器、设置、支付、工作学习类操作通常应判 NO，除非目标明确提到。\n" +
+                "8. reason 必须写详细，至少覆盖：任务目标、当前行为、关键证据、最终结论。\n" +
+                "9. evidence 必须给 1-3 条来自当前页面的关键证据。\n";
     }
 
     private static JSONObject buildResponseFormat() throws Exception {

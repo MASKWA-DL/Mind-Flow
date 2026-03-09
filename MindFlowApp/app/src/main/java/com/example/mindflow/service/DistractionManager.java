@@ -270,10 +270,10 @@ public class DistractionManager {
      * 分析当前状态并检测是否分心
      * @param aiVision AI 视觉理解结果
      * @param foregroundApp 当前前台应用包名
-     * @param whitelist 白名单应用
+     * @param interventionExemptApps 允许使用、但不代表自动命中目标的应用
      * @return 是否处于分心状态
      */
-    public boolean analyzeAndCheck(String aiVision, String foregroundApp, Set<String> whitelist) {
+    public boolean analyzeAndCheck(String aiVision, String foregroundApp, Set<String> interventionExemptApps) {
         long now = System.currentTimeMillis();
 
         // 监控未启用时跳过（停止专注后）
@@ -303,8 +303,9 @@ public class DistractionManager {
 
         AiAssessment assessment = parseAiAssessment(aiVision);
         lastAiActivity = buildActivityLabel(assessment.behavior, foregroundApp);
+        boolean isInterventionExempt = isInterventionExemptApp(foregroundApp, interventionExemptApps);
         boolean isDistractedByApp = assessment.status != DecisionStatus.FOCUSED
-                && checkAppDistraction(foregroundApp, whitelist);
+                && checkAppDistraction(foregroundApp, interventionExemptApps);
 
         if (assessment.status == DecisionStatus.FOCUSED) {
             lastAiFocused = true;
@@ -332,6 +333,15 @@ public class DistractionManager {
             distractionEvidence = Math.max(0, distractionEvidence - UNSURE_RECOVERY);
             logAiRecognition(aiVision + " [低置信忽略]", true);
             lastWorkTime = now;
+            return false;
+        }
+
+        if (assessment.status == DecisionStatus.DISTRACTED && isInterventionExempt) {
+            lastAiFocused = false;
+            consecutiveDistractedSignals = 0;
+            distractionEvidence = Math.max(0, distractionEvidence - UNSURE_RECOVERY);
+            logAiRecognition(aiVision + " [允许使用应用，仅记录偏离目标不干预]", false);
+            Log.i(TAG, "允许使用应用命中偏离目标，仅记录不干预: " + foregroundApp);
             return false;
         }
 
@@ -483,11 +493,10 @@ public class DistractionManager {
         return assessment;
     }
 
-    private boolean checkAppDistraction(String packageName, Set<String> whitelist) {
+    private boolean checkAppDistraction(String packageName, Set<String> interventionExemptApps) {
         if (packageName == null || packageName.isEmpty()) return false;
 
-        // 在用户白名单中的应用不算分心
-        if (whitelist != null && whitelist.contains(packageName)) return false;
+        if (isInterventionExemptApp(packageName, interventionExemptApps)) return false;
 
         String pkg = packageName.toLowerCase();
 
@@ -506,6 +515,24 @@ public class DistractionManager {
                pkg.contains("game") || pkg.contains("video") ||
                pkg.contains("taobao") || pkg.contains("jd.com") ||
                pkg.contains("pinduoduo");
+    }
+
+    private boolean isInterventionExemptApp(String packageName, Set<String> interventionExemptApps) {
+        if (packageName == null || packageName.isEmpty() || interventionExemptApps == null) {
+            return false;
+        }
+        if (interventionExemptApps.contains(packageName)) {
+            return true;
+        }
+        for (String allowed : interventionExemptApps) {
+            if (allowed == null || allowed.isEmpty()) {
+                continue;
+            }
+            if (packageName.startsWith(allowed + ".") || allowed.startsWith(packageName + ".")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void updateWarningLevel() {
@@ -955,13 +982,13 @@ public class DistractionManager {
     }
 
     // === 番茄todo风格：AccessibilityService锁机模式控制 ===
-    private java.util.Set<String> currentWhitelist = new java.util.HashSet<>();
+    private java.util.Set<String> currentInterventionExemptApps = new java.util.HashSet<>();
 
     /**
-     * 设置白名单（从FocusService传入）
+     * 设置允许使用、但不自动算命中目标的应用（从 FocusService 传入）
      */
-    public void setWhitelist(java.util.Set<String> whitelist) {
-        this.currentWhitelist = whitelist;
+    public void setInterventionExemptApps(java.util.Set<String> apps) {
+        this.currentInterventionExemptApps = apps;
     }
 
     /**
@@ -970,11 +997,10 @@ public class DistractionManager {
     private void enableAccessibilityLockMode(long duration, String reason, String advice) {
         AppMonitorService service = AppMonitorService.getInstance();
         if (service != null) {
-            // 同步白名单（确保锁机期间白名单生效）
-            service.updateWhitelist(currentWhitelist);
+            service.updateWhitelist(currentInterventionExemptApps);
             // 激活锁机界面（开始强制拉回）
             service.activateLockScreen();
-            Log.i(TAG, "🔒 已激活锁机界面，白名单: " + currentWhitelist.size() + " 个应用");
+            Log.i(TAG, "🔒 已激活锁机界面，允许使用应用: " + currentInterventionExemptApps.size() + " 个");
         } else {
             Log.w(TAG, "⚠️ AppMonitorService未运行，无法激活锁机界面");
         }

@@ -149,7 +149,7 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="白名单应用（专注期间可用）"
+                        android:text="允许使用应用（仍会参与 AI 判断）"
                         android:textColor="@color/text_secondary"
                         android:textSize="13sp" />
 
@@ -167,7 +167,7 @@
                     android:id="@+id/tvWhitelistCount"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="已选择 0 个应用"
+                    android:text="已选择 0 个允许使用应用"
                     android:textColor="@color/text_hint"
                     android:textSize="11sp" />
 
@@ -178,7 +178,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="36dp"
                     android:layout_marginTop="8dp"
-                    android:text="添加当前前台应用到白名单"
+                    android:text="添加当前前台应用到允许使用列表"
                     android:textSize="11sp" />
             </LinearLayout>
         </androidx.cardview.widget.CardView>

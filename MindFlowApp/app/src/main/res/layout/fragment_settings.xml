@@ -244,7 +244,7 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="应用白名单"
+                        android:text="允许使用应用"
                         android:textColor="@color/text_primary"
                         android:textSize="16sp" />
 
