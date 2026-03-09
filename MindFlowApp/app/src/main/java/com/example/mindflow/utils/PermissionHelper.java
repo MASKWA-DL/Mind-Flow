@@ -9,6 +9,8 @@ import android.os.Build;
 import android.provider.Settings;
 import android.view.accessibility.AccessibilityManager;
 
+import androidx.core.app.NotificationManagerCompat;
+
 import com.example.mindflow.service.AppMonitorService;
 
 import java.util.List;
@@ -131,6 +133,23 @@ public class PermissionHelper {
      */
     public static void requestDndAccessPermission(Context context) {
         Intent intent = new Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        context.startActivity(intent);
+    }
+
+    /**
+     * 检查通知访问权限（NotificationListenerService）
+     */
+    public static boolean hasNotificationListenerPermission(Context context) {
+        return NotificationManagerCompat.getEnabledListenerPackages(context)
+            .contains(context.getPackageName());
+    }
+
+    /**
+     * 打开通知访问权限设置
+     */
+    public static void openNotificationListenerSettings(Context context) {
+        Intent intent = new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         context.startActivity(intent);
     }

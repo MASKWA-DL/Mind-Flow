@@ -2,6 +2,7 @@ package com.example.mindflow.service;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
+import android.app.KeyguardManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -144,6 +145,14 @@ public class AppMonitorService extends AccessibilityService {
         
         int eventType = event.getEventType();
         CharSequence packageNameCs = event.getPackageName();
+
+        if (isDeviceLocked()) {
+            if (packageNameCs != null) {
+                currentPackageName = packageNameCs.toString();
+            }
+            Log.d(TAG, "🔐 系统锁屏中，跳过锁机看门狗");
+            return;
+        }
         
         // === 锁机界面激活时拦截手势事件 ===
         if (isLockScreenActive) {
@@ -325,9 +334,21 @@ public class AppMonitorService extends AccessibilityService {
     private boolean isAlwaysAllowedSystem(String pkg) {
         if (pkg == null) return false;
         return pkg.contains("inputmethod") ||
+               pkg.contains("keyguard") ||
                pkg.contains("keyboard") ||
                pkg.contains("permissioncontroller") ||
                pkg.contains("packageinstaller");
+    }
+
+    private boolean isDeviceLocked() {
+        KeyguardManager keyguardManager = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+        if (keyguardManager == null) {
+            return false;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            return keyguardManager.isDeviceLocked();
+        }
+        return keyguardManager.isKeyguardLocked();
     }
     
     /**

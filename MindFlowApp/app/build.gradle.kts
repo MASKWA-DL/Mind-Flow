@@ -10,8 +10,26 @@ val localPropertiesFile = rootProject.file("local.properties")
 if (localPropertiesFile.exists()) {
     localProperties.load(FileInputStream(localPropertiesFile))
 }
-val glmApiKey = (localProperties.getProperty("GLM_API_KEY") ?: "").trim()
-val glmApiKeyEscaped = glmApiKey
+val aiApiKey = (localProperties.getProperty("AI_API_KEY")
+    ?: localProperties.getProperty("GLM_API_KEY")
+    ?: "").trim()
+val aiApiBaseUrl = (localProperties.getProperty("AI_BASE_URL")
+    ?: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions").trim()
+val aiTextModel = (localProperties.getProperty("AI_TEXT_MODEL")
+    ?: localProperties.getProperty("AI_MODEL")
+    ?: "qwen-plus").trim()
+val aiVisionModel = (localProperties.getProperty("AI_VISION_MODEL")
+    ?: "qwen3-vl-plus").trim()
+val aiApiKeyEscaped = aiApiKey
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+val aiApiBaseUrlEscaped = aiApiBaseUrl
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+val aiTextModelEscaped = aiTextModel
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+val aiVisionModelEscaped = aiVisionModel
     .replace("\\", "\\\\")
     .replace("\"", "\\\"")
 
@@ -26,7 +44,10 @@ android {
         versionCode = 1
         versionName = "1.0"
 
-        buildConfigField("String", "GLM_API_KEY", "\"$glmApiKeyEscaped\"")
+        buildConfigField("String", "AI_API_KEY", "\"$aiApiKeyEscaped\"")
+        buildConfigField("String", "AI_BASE_URL", "\"$aiApiBaseUrlEscaped\"")
+        buildConfigField("String", "AI_TEXT_MODEL", "\"$aiTextModelEscaped\"")
+        buildConfigField("String", "AI_VISION_MODEL", "\"$aiVisionModelEscaped\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -63,27 +84,27 @@ dependencies {
     implementation(libs.constraintlayout)
     implementation(libs.navigation.fragment)
     implementation(libs.navigation.ui)
-    
+
     // Room Database
     implementation(libs.room.runtime)
     annotationProcessor(libs.room.compiler)
-    
+
     // Lifecycle & ViewModel
     implementation(libs.lifecycle.viewmodel)
     implementation(libs.lifecycle.livedata)
-    
+
     // WorkManager
     implementation(libs.work.runtime)
-    
+
     // Gson
     implementation(libs.gson)
-    
+
     // CardView
     implementation(libs.cardview)
-    
+
     // LocalBroadcastManager
     implementation("androidx.localbroadcastmanager:localbroadcastmanager:1.1.0")
-    
+
     testImplementation(libs.junit)
     androidTestImplementation(libs.ext.junit)
     androidTestImplementation(libs.espresso.core)
@@ -103,7 +124,7 @@ dependencies {
     implementation("com.google.code.gson:gson:2.10.1")
 
 
-    
+
     // UI Charts
     implementation(libs.mpandroidchart)
 }

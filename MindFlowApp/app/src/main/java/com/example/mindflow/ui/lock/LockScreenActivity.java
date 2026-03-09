@@ -1,9 +1,10 @@
 package com.example.mindflow.ui.lock;
 
 import android.app.Activity;
-import android.app.KeyguardManager;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
@@ -61,6 +62,7 @@ public class LockScreenActivity extends Activity {
     
     // 唤醒锁
     private PowerManager.WakeLock wakeLock;
+    private BroadcastReceiver screenStateReceiver;
     
     // 【关键】状态持久化（防止被系统杀死后丢失状态）
     private static final String PREFS_LOCK_STATE = "lock_screen_state";
@@ -89,6 +91,7 @@ public class LockScreenActivity extends Activity {
         
         // 初始化UI
         initViews();
+        registerScreenStateReceiver();
         
         // 【关键】尝试从持久化状态恢复（被系统杀死后复活）
         if (!tryRestoreState()) {
@@ -152,15 +155,10 @@ public class LockScreenActivity extends Activity {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true);
             setTurnScreenOn(true);
-            KeyguardManager keyguardManager = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
-            if (keyguardManager != null) {
-                keyguardManager.requestDismissKeyguard(this, null);
-            }
         } else {
             getWindow().addFlags(
                 WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
-                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
-                WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
             );
         }
         
@@ -521,6 +519,8 @@ public class LockScreenActivity extends Activity {
     protected void onDestroy() {
         super.onDestroy();
         Log.d(TAG, "💀 onDestroy");
+
+        unregisterScreenStateReceiver();
         
         if (countDownTimer != null) {
             countDownTimer.cancel();
@@ -554,5 +554,33 @@ public class LockScreenActivity extends Activity {
     public void forceEnd() {
         Log.w(TAG, "⚠️ 强制结束锁机");
         endLock();
+    }
+
+    private void registerScreenStateReceiver() {
+        screenStateReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (!Intent.ACTION_SCREEN_OFF.equals(intent.getAction()) || !isLockActive) {
+                    return;
+                }
+                saveState();
+                Log.i(TAG, "📴 息屏，暂时退出锁机 Activity 以让出系统解锁界面");
+                finish();
+            }
+        };
+        IntentFilter filter = new IntentFilter(Intent.ACTION_SCREEN_OFF);
+        registerReceiver(screenStateReceiver, filter);
+    }
+
+    private void unregisterScreenStateReceiver() {
+        if (screenStateReceiver == null) {
+            return;
+        }
+        try {
+            unregisterReceiver(screenStateReceiver);
+        } catch (Exception e) {
+            Log.w(TAG, "注销息屏接收器失败", e);
+        }
+        screenStateReceiver = null;
     }
 }

@@ -17,13 +17,15 @@ import com.example.mindflow.database.MindFlowDatabase;
 import com.example.mindflow.database.dao.InterventionDao;
 import com.example.mindflow.model.Intervention;
 
+import org.json.JSONObject;
+
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.Executors;
 
 /**
  * 分心检测与渐进式警告管理器
- * 
+ *
  * 警告级别（简化版）：
  * 1. NONE - 正常工作状态
  * 2. WARNING - 弹窗提醒 (1-2次分心)
@@ -31,56 +33,78 @@ import java.util.concurrent.Executors;
  */
 public class DistractionManager {
     private static final String TAG = "DistractionManager";
-    
+
     public enum WarningLevel {
         NONE,      // 无警告
         WARNING,   // 弹窗提醒 (1-2次分心)
         LOCK       // 锁定 (3次以上)
     }
-    
+
     // 阈值配置
     private static final int WARNING_THRESHOLD = 1;
     private static final int LOCK_THRESHOLD = 3;
-    
+
     // 连续工作可减少警告计数的时间（秒）
     private static final int WORK_RECOVERY_SECONDS = 30;
     // 分心记录防抖时间（毫秒）- 两次分心记录之间至少间隔此时间
     private static final long DISTRACTION_DEBOUNCE_MS = 15000; // 15秒，与AI监控频率同步
-    
+    private static final int LOW_CONFIDENCE_THRESHOLD = 60;
+    private static final int MEDIUM_CONFIDENCE_THRESHOLD = 75;
+    private static final int HIGH_CONFIDENCE_THRESHOLD = 85;
+    private static final int DISTRACTION_TRIGGER_EVIDENCE = 70;
+    private static final int APP_SIGNAL_EVIDENCE = 20;
+    private static final int STRONG_FOCUS_RECOVERY = 35;
+    private static final int UNSURE_RECOVERY = 15;
+
+    private enum DecisionStatus {
+        FOCUSED,
+        DISTRACTED,
+        UNSURE
+    }
+
+    private static final class AiAssessment {
+        DecisionStatus status = DecisionStatus.UNSURE;
+        String behavior = "未知行为";
+        String reason = "信息不足";
+        int confidence = 40;
+    }
+
     private final Context context;
     private int distractionCount = 0;
     private int totalDistractionCount = 0;
     private long lastDistractionTime = 0;
     private long lastWorkTime = 0;
     private int consecutiveWorkSeconds = 0;
-    
+    private int distractionEvidence = 0;
+    private int consecutiveDistractedSignals = 0;
+
     private WarningLevel currentLevel = WarningLevel.NONE;
     private String lastWarningMessage = "";
     private String lastAiActivity = ""; // AI 识别的用户行为
     private boolean lastAiFocused = true; // AI 判断是否专注
-    
+
     // 提醒冷却时间（毫秒）- 两次提醒之间至少间隔15秒，与AI监控频率同步
     private static final long WARNING_COOLDOWN_MS = 15000; // 15秒
     private long lastWarningTime = 0;
-    
+
     // 分心历史记录（从SharedPreferences加载）
     private final java.util.List<String> distractionHistoryList = new java.util.ArrayList<>();
     private static final String PREF_DISTRACTION_HISTORY = "distraction_history_list";
-    
+
     // AI识别日志（调试用）
     private final java.util.List<String> aiRecognitionLog = new java.util.ArrayList<>();
     private static final String PREF_AI_RECOGNITION_LOG = "ai_recognition_log";
-    
+
     // 锁定状态
     private boolean isLocked = false;
-    
+
     // 监控是否启用（停止专注后设为false，防止继续触发锁机）
     private boolean isMonitoringEnabled = false;
-    
+
     // 锁机页面分心记录缓存（只保存最近3条判断为"否"的记录）
     private final java.util.List<String> lockScreenDistractionCache = new java.util.ArrayList<>();
     private static final int MAX_LOCK_CACHE_SIZE = 3;
-    
+
     // 系统应用白名单 - 这些应用永远不算分心（桌面、启动器、设置等）
     private static final String[] SYSTEM_WHITELIST = {
         "launcher", "home", "desktop", "桌面",  // 桌面启动器
@@ -89,14 +113,14 @@ public class DistractionManager {
         "inputmethod", "keyboard", "输入法",  // 输入法
         "permissioncontroller", "packageinstaller"  // 权限管理
     };
-    
+
     // 不应计为分心的AI识别关键词
     private static final String[] IGNORE_KEYWORDS = {
         "正在分析", "分析中", "加载中", "loading",
         "停留在应用桌面", "桌面", "主屏幕", "home",
         "锁屏", "解锁", "通知栏"
     };
-    
+
     // 分心关键词
     private static final String[] DISTRACTION_KEYWORDS = {
         "视频", "抖音", "快手", "bilibili", "b站", "电影", "电视剧",
@@ -106,7 +130,7 @@ public class DistractionManager {
         "聊天", "微信聊天", "qq聊天",
         "购物", "淘宝", "京东", "拼多多"
     };
-    
+
     // 工作关键词
     private static final String[] WORK_KEYWORDS = {
         "代码", "编程", "写作", "文档", "word", "excel", "ppt",
@@ -114,11 +138,11 @@ public class DistractionManager {
         "学习", "阅读", "笔记", "课程", "论文",
         "设计", "画图", "开发"
     };
-    
+
     // 数据库
     private final InterventionDao interventionDao;
     private String currentSessionId = "";
-    
+
     public DistractionManager(Context context) {
         this.context = context;
         this.interventionDao = MindFlowDatabase.getInstance(context).interventionDao();
@@ -126,7 +150,7 @@ public class DistractionManager {
         loadDistractionHistory();
         loadAiRecognitionLog();
     }
-    
+
     /**
      * 从SharedPreferences加载分心历史
      */
@@ -142,7 +166,7 @@ public class DistractionManager {
             }
         }
     }
-    
+
     /**
      * 保存分心历史到SharedPreferences（上限20条）
      */
@@ -157,7 +181,7 @@ public class DistractionManager {
         }
         prefs.edit().putString(PREF_DISTRACTION_HISTORY, sb.toString()).apply();
     }
-    
+
     /**
      * 从SharedPreferences加载AI识别日志
      */
@@ -173,7 +197,7 @@ public class DistractionManager {
             }
         }
     }
-    
+
     /**
      * 保存AI识别日志到SharedPreferences（上限50条）
      */
@@ -188,7 +212,7 @@ public class DistractionManager {
         }
         prefs.edit().putString(PREF_AI_RECOGNITION_LOG, sb.toString()).apply();
     }
-    
+
     /**
      * 记录AI识别结果（带时间戳，用于调试）
      */
@@ -199,7 +223,7 @@ public class DistractionManager {
         saveAiRecognitionLog();
         Log.d(TAG, "AI识别日志: " + logEntry);
     }
-    
+
     /**
      * 获取AI识别日志（全部50条，带时间戳）
      */
@@ -218,14 +242,14 @@ public class DistractionManager {
         }
         return sb.toString();
     }
-    
+
     /**
      * 获取AI识别日志条数
      */
     public int getAiRecognitionLogCount() {
         return aiRecognitionLog.size();
     }
-    
+
     /**
      * 清空AI识别日志
      */
@@ -234,14 +258,14 @@ public class DistractionManager {
         saveAiRecognitionLog();
         Log.d(TAG, "AI识别日志已清空");
     }
-    
+
     /**
      * 设置当前会话ID（用于记录干预事件）
      */
     public void setSessionId(String sessionId) {
         this.currentSessionId = sessionId;
     }
-    
+
     /**
      * 分析当前状态并检测是否分心
      * @param aiVision AI 视觉理解结果
@@ -251,247 +275,222 @@ public class DistractionManager {
      */
     public boolean analyzeAndCheck(String aiVision, String foregroundApp, Set<String> whitelist) {
         long now = System.currentTimeMillis();
-        
+
         // 监控未启用时跳过（停止专注后）
         if (!isMonitoringEnabled) {
             Log.d(TAG, "监控未启用，跳过检测");
             return false;
         }
-        
+
         // 锁定期间不进行监控
         if (isLocked) {
             Log.d(TAG, "应用已锁定，跳过监控");
             return false;
         }
-        
+
         // 提醒冷却期内不进行监控（两次提醒间隔至少15秒，与AI监控频率同步）
         if (now - lastWarningTime < WARNING_COOLDOWN_MS && lastWarningTime > 0) {
             Log.d(TAG, "提醒冷却期内（" + (WARNING_COOLDOWN_MS - (now - lastWarningTime)) / 1000 + "秒后恢复），跳过监控");
             return false;
         }
-        
+
         // 缓冲期内不进行监控（开始专注后/锁机结束后的6秒缓冲）
         AppMonitorService service = AppMonitorService.getInstance();
         if (service != null && service.isInBufferPeriod()) {
             Log.d(TAG, "缓冲期内，跳过监控");
             return false;
         }
-        
-        // 检查 AI 视觉结果（AI的判断优先级最高）
-        boolean isDistractedByVision = checkVisionDistraction(aiVision);
-        boolean isDistractedByApp = false;
-        
-        // 重要：如果AI已经判断用户行为符合目标，则完全信任AI，不再检查应用包名
-        // 这样用户设置"刷抖音"为目标时，即使在抖音App也不会被判定为分心
-        boolean isDistracted;
-        if (lastAiFocused) {
-            // AI说符合目标，直接判定为不分心
-            isDistracted = false;
-        } else {
-            // AI说不符合目标，或者没有AI结果时，才检查应用包名
-            isDistractedByApp = checkAppDistraction(foregroundApp, whitelist);
-            isDistracted = isDistractedByVision || isDistractedByApp;
-        }
-        
-        if (isDistracted) {
-            // 防抖：使用常量DISTRACTION_DEBOUNCE_MS（15秒），与AI监控频率同步
-            if (now - lastDistractionTime > DISTRACTION_DEBOUNCE_MS) {
-                distractionCount++;
-                totalDistractionCount++;
-                lastDistractionTime = now;
-                consecutiveWorkSeconds = 0;
-                
-                Log.w(TAG, "检测到分心！计数: " + distractionCount + 
-                    ", 原因: " + (isDistractedByVision ? "视觉[" + aiVision + "]" : "") +
-                    (isDistractedByApp ? " 应用[" + foregroundApp + "]" : ""));
-                
-                // 记录分心行为并持久化（更详细的记录）
-                String timestamp = new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(new java.util.Date());
-                String activity = (lastAiActivity != null && !lastAiActivity.isEmpty()) ? lastAiActivity : "未知行为";
-                String appInfo = (foregroundApp != null && !foregroundApp.isEmpty()) ? getAppLabel(foregroundApp) : "";
-                String record = "• [" + timestamp + "] " + activity;
-                if (!appInfo.isEmpty() && !activity.contains(appInfo)) {
-                    record += " (App: " + appInfo + ")";
-                }
-                distractionHistoryList.add(record);
-                saveDistractionHistory();
-                
-                // 同时保存到数据库
-                saveDistractionToDatabase(activity, foregroundApp, aiVision);
-                
-                // 更新警告级别并执行警告
-                updateWarningLevel();
-                executeWarning();
-            }
-            return true;
-        } else {
-            // 正在工作，记录时间
+
+        AiAssessment assessment = parseAiAssessment(aiVision);
+        lastAiActivity = buildActivityLabel(assessment.behavior, foregroundApp);
+        boolean isDistractedByApp = assessment.status != DecisionStatus.FOCUSED
+                && checkAppDistraction(foregroundApp, whitelist);
+
+        if (assessment.status == DecisionStatus.FOCUSED) {
+            lastAiFocused = true;
+            consecutiveDistractedSignals = 0;
+            distractionEvidence = Math.max(0, distractionEvidence - STRONG_FOCUS_RECOVERY);
+            logAiRecognition(aiVision, true);
             lastWorkTime = now;
             return false;
         }
+
+        if (assessment.status == DecisionStatus.UNSURE && !isDistractedByApp) {
+            lastAiFocused = true;
+            consecutiveDistractedSignals = 0;
+            distractionEvidence = Math.max(0, distractionEvidence - UNSURE_RECOVERY);
+            logAiRecognition(aiVision + " [不确定]", true);
+            lastWorkTime = now;
+            return false;
+        }
+
+        if (assessment.status == DecisionStatus.DISTRACTED
+                && assessment.confidence < LOW_CONFIDENCE_THRESHOLD
+                && !isDistractedByApp) {
+            lastAiFocused = true;
+            consecutiveDistractedSignals = 0;
+            distractionEvidence = Math.max(0, distractionEvidence - UNSURE_RECOVERY);
+            logAiRecognition(aiVision + " [低置信忽略]", true);
+            lastWorkTime = now;
+            return false;
+        }
+
+        if (assessment.status == DecisionStatus.DISTRACTED) {
+            consecutiveDistractedSignals++;
+        } else {
+            consecutiveDistractedSignals = 0;
+        }
+
+        int evidenceDelta = getEvidenceDelta(assessment.confidence, assessment.status);
+        if (isDistractedByApp) {
+            evidenceDelta += APP_SIGNAL_EVIDENCE;
+        }
+        distractionEvidence = clamp(distractionEvidence + evidenceDelta, 0, 100);
+        lastAiFocused = false;
+
+        boolean strongDistracted = assessment.status == DecisionStatus.DISTRACTED
+                && assessment.confidence >= HIGH_CONFIDENCE_THRESHOLD;
+        boolean repeatedMediumDistracted = assessment.status == DecisionStatus.DISTRACTED
+                && assessment.confidence >= MEDIUM_CONFIDENCE_THRESHOLD
+                && consecutiveDistractedSignals >= 2;
+        boolean evidenceEnough = distractionEvidence >= DISTRACTION_TRIGGER_EVIDENCE;
+
+        Log.d(TAG, "分心证据: status=" + assessment.status + ", confidence=" + assessment.confidence
+                + ", appSignal=" + isDistractedByApp + ", consecutive=" + consecutiveDistractedSignals
+                + ", evidence=" + distractionEvidence);
+
+        if (!strongDistracted && !repeatedMediumDistracted && !evidenceEnough) {
+            logAiRecognition(aiVision + " [证据累计中]", false);
+            return false;
+        }
+
+        if (now - lastDistractionTime <= DISTRACTION_DEBOUNCE_MS) {
+            Log.d(TAG, "分心事件防抖中，暂不重复记分");
+            return false;
+        }
+
+        recordDistraction(now, foregroundApp, aiVision, assessment);
+        return true;
     }
-    
-    private boolean checkVisionDistraction(String aiVision) {
-        if (aiVision == null || aiVision.isEmpty()) return false;
-        
-        // 先检查是否包含应该忽略的关键词（桌面、分析中等）
-        String visionLower = aiVision.toLowerCase();
+
+    private AiAssessment parseAiAssessment(String aiVision) {
+        AiAssessment assessment = new AiAssessment();
+        if (aiVision == null || aiVision.isEmpty()) {
+            assessment.behavior = "信息不足";
+            return assessment;
+        }
+
+        String visionLower = aiVision.toLowerCase(Locale.ROOT);
         for (String ignoreKw : IGNORE_KEYWORDS) {
-            if (visionLower.contains(ignoreKw.toLowerCase())) {
-                Log.d(TAG, "忽略关键词匹配，不计为分心: " + aiVision);
-                lastAiActivity = aiVision;
-                lastAiFocused = true;
-                return false;
+            if (visionLower.contains(ignoreKw.toLowerCase(Locale.ROOT))) {
+                assessment.status = DecisionStatus.FOCUSED;
+                assessment.behavior = aiVision;
+                assessment.reason = "系统过渡界面";
+                assessment.confidence = 100;
+                return assessment;
             }
         }
-        
-        // 解析 AI 返回的JSON格式：{"conclusion":"YES/NO","reason":"...","behavior":"...","confidence":0-100}
-        if (aiVision.contains("conclusion")) {
+
+        String jsonPayload = extractJsonPayload(aiVision);
+        if (jsonPayload.startsWith("{")) {
             try {
-                // 提取conclusion字段
-                String conclusion = extractJsonField(aiVision, "conclusion").toUpperCase().trim();
-                String behavior = extractJsonField(aiVision, "behavior");
-                String reason = extractJsonField(aiVision, "reason");
-                String confidenceStr = extractJsonField(aiVision, "confidence");
-                int confidence = 50;
-                try {
-                    confidence = Integer.parseInt(confidenceStr.replaceAll("[^0-9]", ""));
-                } catch (Exception ignored) {}
-                
-                lastAiActivity = behavior.isEmpty() ? "未知行为" : behavior;
-                Log.d(TAG, "AI JSON解析: conclusion=" + conclusion + ", behavior=" + behavior + ", reason=" + reason + ", confidence=" + confidence);
-                
-                // 【核心逻辑】判断是否分心 - 以conclusion为主，reason为辅
-                // 只有当conclusion明确为NO时才判定为分心
-                boolean conclusionIsNo = conclusion.equals("NO") || conclusion.startsWith("NO");
-                boolean conclusionIsYes = conclusion.equals("YES") || conclusion.startsWith("YES");
-                
-                // 检查reason和conclusion是否矛盾
-                boolean reasonSaysDistracted = reason.contains("不符合") || reason.contains("偏离目标") || reason.contains("与目标无关");
-                boolean reasonSaysFocused = reason.contains("符合目标") || reason.contains("相关") || reason.contains("正在进行");
-                
-                // 如果conclusion和reason矛盾，记录日志并以conclusion为准（因为conclusion是AI的最终判断）
-                if ((conclusionIsYes && reasonSaysDistracted) || (conclusionIsNo && reasonSaysFocused)) {
-                    Log.w(TAG, "⚠️ AI判断矛盾! conclusion=" + conclusion + ", reason=" + reason + " -> 以conclusion为准");
+                JSONObject json = new JSONObject(jsonPayload);
+                String conclusion = json.optString("conclusion", "").trim().toUpperCase(Locale.ROOT);
+                String behavior = json.optString("behavior", "").trim();
+                String reason = json.optString("reason", "").trim();
+                int confidence = parseConfidence(json);
+
+                assessment.status = parseConclusion(conclusion, reason);
+                assessment.behavior = behavior.isEmpty() ? "未知行为" : behavior;
+                assessment.reason = reason.isEmpty() ? "未提供理由" : reason;
+                assessment.confidence = confidence;
+
+                boolean reasonSaysDistracted = containsAnyIgnoreCase(reason, "不符合", "偏离目标", "无关", "娱乐", "购物");
+                boolean reasonSaysFocused = containsAnyIgnoreCase(reason, "符合目标", "相关", "正在进行", "学习", "工作");
+                if ((assessment.status == DecisionStatus.FOCUSED && reasonSaysDistracted)
+                        || (assessment.status == DecisionStatus.DISTRACTED && reasonSaysFocused)) {
+                    Log.w(TAG, "AI JSON结论与原因矛盾，降级为不确定: " + jsonPayload);
+                    assessment.status = DecisionStatus.UNSURE;
+                    assessment.confidence = Math.min(assessment.confidence, 55);
                 }
-                
-                // 最终判断：只有conclusion=NO且置信度>=50时才判定为分心
-                boolean isDistracted = conclusionIsNo && confidence >= 50;
-                
-                // 如果conclusion不明确（既不是YES也不是NO），默认为专注
-                if (!conclusionIsNo && !conclusionIsYes) {
-                    Log.w(TAG, "⚠️ AI conclusion不明确: " + conclusion + " -> 默认为专注");
-                    isDistracted = false;
-                }
-                
-                if (isDistracted) {
-                    lastAiFocused = false;
-                    logAiRecognition(aiVision, false);
-                    // 写入锁机缓存（只保留最近3条）
-                    addToLockScreenCache(behavior, reason);
-                    Log.w(TAG, "⚠️ AI判断: 分心! conclusion=" + conclusion + ", reason=" + reason);
-                    return true;  // 分心
-                } else {
-                    lastAiFocused = true;
-                    logAiRecognition(aiVision, true);
-                    Log.d(TAG, "✅ AI判断: 专注! conclusion=" + conclusion + ", reason=" + reason);
-                    return false;  // 不分心
-                }
+
+                Log.d(TAG, "AI JSON解析: conclusion=" + conclusion + ", behavior=" + assessment.behavior
+                        + ", reason=" + assessment.reason + ", confidence=" + assessment.confidence);
+                return assessment;
             } catch (Exception e) {
-                Log.w(TAG, "JSON解析失败: " + e.getMessage() + " -> 默认为专注");
-                lastAiFocused = true;
-                return false;
+                Log.w(TAG, "JSON解析失败，回退兼容逻辑: " + e.getMessage());
             }
         }
-        
-        // 兼容旧格式：[结论]：是/否
+
         if (aiVision.contains("结论")) {
             int conclusionIndex = aiVision.lastIndexOf("结论");
             if (conclusionIndex >= 0) {
+                assessment.behavior = "分心行为";
+                assessment.reason = aiVision;
                 String conclusionPart = aiVision.substring(conclusionIndex);
                 if (conclusionPart.contains("否")) {
-                    lastAiFocused = false;
-                    logAiRecognition(aiVision, false);
-                    // 旧格式也要写入锁机缓存
-                    addToLockScreenCache("分心行为", aiVision.length() > 50 ? aiVision.substring(0, 50) : aiVision);
-                    return true;
+                    assessment.status = DecisionStatus.DISTRACTED;
+                    assessment.confidence = 75;
                 } else if (conclusionPart.contains("是")) {
-                    lastAiFocused = true;
-                    logAiRecognition(aiVision, true);
-                    return false;
+                    assessment.status = DecisionStatus.FOCUSED;
+                    assessment.confidence = 75;
                 }
+                return assessment;
             }
         }
-        
-        // 兼容旧格式："[行为描述] | [是否符合目标:是/否]"
+
         if (aiVision.contains("|")) {
             String[] parts = aiVision.split("\\|");
             if (parts.length >= 2) {
-                lastAiActivity = parts[0].trim();
-                String focusStatus = parts[1].trim().toLowerCase();
-                
+                assessment.behavior = parts[0].trim();
+                assessment.reason = parts[1].trim();
+                String focusStatus = parts[1].trim().toLowerCase(Locale.ROOT);
                 if (focusStatus.endsWith("否") || focusStatus.contains(":否") || focusStatus.contains("：否")) {
-                    lastAiFocused = false;
-                    logAiRecognition(aiVision, false);
-                    return true;  // 分心
+                    assessment.status = DecisionStatus.DISTRACTED;
+                    assessment.confidence = 70;
                 } else if (focusStatus.endsWith("是") || focusStatus.contains(":是") || focusStatus.contains("：是")) {
-                    lastAiFocused = true;
-                    logAiRecognition(aiVision, true);
-                    return false;  // 不分心
+                    assessment.status = DecisionStatus.FOCUSED;
+                    assessment.confidence = 70;
                 }
-                
-                Log.w(TAG, "AI响应格式异常: " + aiVision);
-                logAiRecognition(aiVision + " [格式异常]", true);
-                lastAiFocused = true;
-                return false;
+                return assessment;
             }
         }
-        
-        // 如果AI返回了错误信息或格式不对，默认不判定为分心
+
         if (aiVision.contains("行为描述") || aiVision.contains("错误") || aiVision.contains("无法")) {
-            Log.w(TAG, "AI返回异常内容: " + aiVision);
-            logAiRecognition(aiVision + " [异常]", true);
-            lastAiActivity = "分析中...";
-            lastAiFocused = true;
-            return false;
+            assessment.behavior = "分析中...";
+            assessment.reason = aiVision;
+            assessment.confidence = 20;
+            return assessment;
         }
-        
-        // 如果旧格式，用关键词判断
-        lastAiActivity = aiVision;
-        String vision = aiVision.toLowerCase(Locale.CHINA);
-        
-        // 先检查是否在工作
-        for (String keyword : WORK_KEYWORDS) {
-            if (vision.contains(keyword.toLowerCase())) {
-                lastAiFocused = true;
-                logAiRecognition(aiVision + " [关键词:工作]", true);
-                return false;
-            }
+
+        assessment.behavior = aiVision;
+        if (containsAnyIgnoreCase(aiVision, WORK_KEYWORDS)) {
+            assessment.status = DecisionStatus.FOCUSED;
+            assessment.confidence = 65;
+            assessment.reason = "关键词表明当前行为与工作/学习相关";
+            return assessment;
         }
-        
-        // 检查分心关键词
-        for (String keyword : DISTRACTION_KEYWORDS) {
-            if (vision.contains(keyword.toLowerCase())) {
-                lastAiFocused = false;
-                logAiRecognition(aiVision + " [关键词:分心]", false);
-                return true;
-            }
+        if (containsAnyIgnoreCase(aiVision, DISTRACTION_KEYWORDS)) {
+            assessment.status = DecisionStatus.DISTRACTED;
+            assessment.confidence = 65;
+            assessment.reason = "关键词表明当前行为偏向娱乐/闲逛";
+            return assessment;
         }
-        
-        // 默认不判定为分心（宽容处理）
-        lastAiFocused = true;
-        logAiRecognition(aiVision + " [默认:专注]", true);
-        return false;
+
+        assessment.behavior = "信息不足";
+        assessment.reason = "无法从AI结果中提取稳定结论";
+        assessment.confidence = 35;
+        return assessment;
     }
-    
+
     private boolean checkAppDistraction(String packageName, Set<String> whitelist) {
         if (packageName == null || packageName.isEmpty()) return false;
-        
+
         // 在用户白名单中的应用不算分心
-        if (whitelist.contains(packageName)) return false;
-        
+        if (whitelist != null && whitelist.contains(packageName)) return false;
+
         String pkg = packageName.toLowerCase();
-        
+
         // 系统应用白名单 - 桌面、启动器、设置等永远不算分心
         for (String sysApp : SYSTEM_WHITELIST) {
             if (pkg.contains(sysApp.toLowerCase())) {
@@ -499,7 +498,7 @@ public class DistractionManager {
                 return false;
             }
         }
-        
+
         // 常见分心应用包名
         return pkg.contains("douyin") || pkg.contains("tiktok") ||
                pkg.contains("kuaishou") || pkg.contains("bilibili") ||
@@ -508,7 +507,7 @@ public class DistractionManager {
                pkg.contains("taobao") || pkg.contains("jd.com") ||
                pkg.contains("pinduoduo");
     }
-    
+
     private void updateWarningLevel() {
         // 简化逻辑：分心3次直接锁机，不弹窗警告
         if (distractionCount >= LOCK_THRESHOLD) {
@@ -518,14 +517,14 @@ public class DistractionManager {
             // 不再显示WARNING弹窗，只记录状态
             currentLevel = distractionCount > 0 ? WarningLevel.WARNING : WarningLevel.NONE;
             int remaining = LOCK_THRESHOLD - distractionCount;
-            lastWarningMessage = distractionCount > 0 ? 
+            lastWarningMessage = distractionCount > 0 ?
                 "分心: " + distractionCount + "/" + LOCK_THRESHOLD : "";
         }
     }
-    
+
     private void executeWarning() {
         long now = System.currentTimeMillis();
-        
+
         switch (currentLevel) {
             case WARNING:
                 // 分心1-2次：震动通知提醒（有冷却时间）
@@ -544,7 +543,7 @@ public class DistractionManager {
                 break;
         }
     }
-    
+
     /**
      * 记录干预事件到数据库（用于报告统计）
      */
@@ -561,7 +560,7 @@ public class DistractionManager {
                 intervention.deltaDistraction = 1.0f;
                 intervention.deltaFocusTime = 0f;
                 intervention.userFeedback = "pending";
-                
+
                 interventionDao.insert(intervention);
                 Log.d(TAG, "干预事件已记录: " + type + " - " + lastAiActivity);
             } catch (Exception e) {
@@ -569,26 +568,26 @@ public class DistractionManager {
             }
         });
     }
-    
+
     private static final String CHANNEL_WARNING_ID = "MindFlow_Warning_Channel";
     private static final int NOTIFICATION_WARNING_ID = 2001;
-    
+
     /**
      * 显示分心警告通知（Heads-up弹出）
      * 只是提醒，点击后只是取消通知，不进入锁机
      */
     private void showWarningNotification() {
         createWarningChannel();
-        
+
         int remaining = LOCK_THRESHOLD - distractionCount;
-        
+
         // 点击通知只是打开主界面，不进入锁机
         Intent mainIntent = new Intent(context, com.example.mindflow.MainActivity.class);
         mainIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         PendingIntent mainPendingIntent = PendingIntent.getActivity(
-            context, 100, mainIntent, 
+            context, 100, mainIntent,
             PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        
+
         // 根据官方文档，Heads-up通知需要：IMPORTANCE_HIGH + PRIORITY_HIGH + sound或vibrate
         NotificationCompat.Builder builder = new NotificationCompat.Builder(context, CHANNEL_WARNING_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
@@ -604,37 +603,37 @@ public class DistractionManager {
             .setAutoCancel(true)  // 点击后自动取消
             .setTimeoutAfter(5000)  // 5秒后自动消失
             .setDefaults(NotificationCompat.DEFAULT_SOUND | NotificationCompat.DEFAULT_VIBRATE);
-        
+
         NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm != null) {
             nm.notify(NOTIFICATION_WARNING_ID, builder.build());
         }
     }
-    
+
     /**
      * 显示锁定通知并立即进入锁屏界面
      */
     private void showLockNotification() {
         createWarningChannel();
-        
+
         // 设置锁定状态
         isLocked = true;
-        
+
         // 锁机界面由FocusService通过LockOverlayManager统一管理
         // DistractionManager只负责检测和计数，不直接启动锁机界面
         // FocusService会监听WARNING级别变化并触发锁机Overlay
-        
+
         Log.i(TAG, "🔒 锁定状态已设置，等待FocusService显示锁机Overlay");
     }
-    
+
     private void createWarningChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
             if (nm == null) return;
-            
+
             // 先删除旧渠道（如果存在），确保新设置生效
             nm.deleteNotificationChannel(CHANNEL_WARNING_ID);
-            
+
             NotificationChannel channel = new NotificationChannel(
                 CHANNEL_WARNING_ID,
                 "分心警告",
@@ -647,11 +646,11 @@ public class DistractionManager {
             channel.setBypassDnd(true);  // 绕过勿扰模式
             channel.enableLights(true);
             channel.setShowBadge(true);
-            
+
             nm.createNotificationChannel(channel);
         }
     }
-    
+
     /**
      * 锁定触发后调用，重置部分计数
      */
@@ -659,6 +658,8 @@ public class DistractionManager {
         distractionCount = 0;
         currentLevel = WarningLevel.NONE;
         consecutiveWorkSeconds = 0;
+        distractionEvidence = 0;
+        consecutiveDistractedSignals = 0;
     }
 
     /**
@@ -668,9 +669,11 @@ public class DistractionManager {
         distractionCount = 0;
         currentLevel = WarningLevel.NONE;
         isLocked = false;  // 【关键】重置锁定状态，否则AI分析不会恢复
+        distractionEvidence = 0;
+        consecutiveDistractedSignals = 0;
         Log.i(TAG, "分心次数已重置，恢复 3/3 机会");
     }
-    
+
     /**
      * 完全重置（新会话开始时调用）
      */
@@ -680,6 +683,8 @@ public class DistractionManager {
         lastDistractionTime = 0;
         lastWorkTime = 0;
         consecutiveWorkSeconds = 0;
+        distractionEvidence = 0;
+        consecutiveDistractedSignals = 0;
         currentLevel = WarningLevel.NONE;
         lastWarningMessage = "";
         isLocked = false;  // 重置锁定状态
@@ -691,21 +696,21 @@ public class DistractionManager {
         saveDistractionHistory();
         Log.d(TAG, "会话重置：AI日志和分心历史已清空");
     }
-    
+
     /**
      * 设置锁定状态
      */
     public void setLocked(boolean locked) {
         this.isLocked = locked;
     }
-    
+
     /**
      * 获取锁定状态
      */
     public boolean isLocked() {
         return isLocked;
     }
-    
+
     /**
      * 启用监控（开始专注时调用）
      */
@@ -713,7 +718,7 @@ public class DistractionManager {
         this.isMonitoringEnabled = true;
         Log.i(TAG, "📊 监控已启用");
     }
-    
+
     /**
      * 禁用监控（停止专注时调用）
      */
@@ -721,7 +726,7 @@ public class DistractionManager {
         this.isMonitoringEnabled = false;
         Log.i(TAG, "📊 监控已禁用");
     }
-    
+
     /**
      * 完全停止并重置（停止专注时调用）
      */
@@ -731,10 +736,12 @@ public class DistractionManager {
         this.distractionCount = 0;
         this.currentLevel = WarningLevel.NONE;
         this.lastAiFocused = true;
+        this.distractionEvidence = 0;
+        this.consecutiveDistractedSignals = 0;
         this.lockScreenDistractionCache.clear();  // 清空锁机缓存
         Log.i(TAG, "🛑 监控已完全停止，所有状态已重置");
     }
-    
+
     /**
      * 添加分心记录到锁机缓存（只保留最近3条）
      */
@@ -749,7 +756,7 @@ public class DistractionManager {
         }
         Log.d(TAG, "📝 锁机缓存添加记录: " + record);
     }
-    
+
     /**
      * 获取锁机页面显示的分心记录（最近3条）
      */
@@ -766,7 +773,7 @@ public class DistractionManager {
         }
         return sb.toString();
     }
-    
+
     /**
      * 清空锁机缓存（锁机结束时调用）
      */
@@ -774,30 +781,145 @@ public class DistractionManager {
         lockScreenDistractionCache.clear();
         Log.d(TAG, "🗑️ 锁机缓存已清空");
     }
-    
+
     /**
-     * 从JSON字符串中提取指定字段的值
+     * 记录一次有效分心事件
      */
-    private String extractJsonField(String json, String fieldName) {
-        try {
-            // 查找 "fieldName":"value" 或 "fieldName": "value"
-            String pattern1 = "\"" + fieldName + "\":\"";
-            String pattern2 = "\"" + fieldName + "\": \"";
-            int start = json.indexOf(pattern1);
-            if (start == -1) start = json.indexOf(pattern2);
-            if (start == -1) return "";
-            
-            start = json.indexOf("\"", start + fieldName.length() + 2) + 1;
-            int end = json.indexOf("\"", start);
-            if (end > start) {
-                return json.substring(start, end);
-            }
-        } catch (Exception e) {
-            Log.w(TAG, "提取JSON字段失败: " + fieldName);
+    private void recordDistraction(long now, String foregroundApp, String aiVision, AiAssessment assessment) {
+        distractionCount++;
+        totalDistractionCount++;
+        lastDistractionTime = now;
+        consecutiveWorkSeconds = 0;
+        distractionEvidence = 25;
+        consecutiveDistractedSignals = 0;
+
+        String activity = buildActivityLabel(assessment.behavior, foregroundApp);
+        lastAiActivity = activity;
+        logAiRecognition(aiVision + " [有效分心]", false);
+        addToLockScreenCache(activity, assessment.reason);
+
+        Log.w(TAG, "检测到分心！计数: " + distractionCount
+                + ", confidence=" + assessment.confidence
+                + ", activity=" + activity
+                + ", reason=" + assessment.reason);
+
+        String timestamp = new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+            .format(new java.util.Date());
+        String appInfo = (foregroundApp != null && !foregroundApp.isEmpty()) ? getAppLabel(foregroundApp) : "";
+        String record = "• [" + timestamp + "] " + activity;
+        if (!appInfo.isEmpty() && !activity.contains(appInfo)) {
+            record += " (App: " + appInfo + ")";
         }
-        return "";
+        distractionHistoryList.add(record);
+        saveDistractionHistory();
+        saveDistractionToDatabase(activity, foregroundApp, aiVision);
+        updateWarningLevel();
+        executeWarning();
     }
-    
+
+    private int getEvidenceDelta(int confidence, DecisionStatus status) {
+        if (status == DecisionStatus.UNSURE) {
+            return APP_SIGNAL_EVIDENCE / 2;
+        }
+        if (status != DecisionStatus.DISTRACTED) {
+            return -UNSURE_RECOVERY;
+        }
+        if (confidence >= HIGH_CONFIDENCE_THRESHOLD) {
+            return 60;
+        }
+        if (confidence >= MEDIUM_CONFIDENCE_THRESHOLD) {
+            return 40;
+        }
+        if (confidence >= LOW_CONFIDENCE_THRESHOLD) {
+            return 25;
+        }
+        return 10;
+    }
+
+    private DecisionStatus parseConclusion(String conclusion, String reason) {
+        if (conclusion == null) {
+            return containsAnyIgnoreCase(reason, "不符合", "偏离目标", "无关")
+                    ? DecisionStatus.DISTRACTED
+                    : DecisionStatus.UNSURE;
+        }
+        String normalized = conclusion.trim().toUpperCase(Locale.ROOT);
+        if (normalized.startsWith("YES") || normalized.contains("符合")) {
+            return DecisionStatus.FOCUSED;
+        }
+        if (normalized.startsWith("NO") || normalized.contains("不符合")) {
+            return DecisionStatus.DISTRACTED;
+        }
+        if (normalized.contains("UNSURE") || normalized.contains("UNKNOWN")
+                || normalized.contains("MAYBE") || normalized.contains("不确定")
+                || normalized.contains("信息不足")) {
+            return DecisionStatus.UNSURE;
+        }
+        if (containsAnyIgnoreCase(reason, "不符合", "偏离目标", "无关")) {
+            return DecisionStatus.DISTRACTED;
+        }
+        if (containsAnyIgnoreCase(reason, "符合目标", "相关", "正在进行")) {
+            return DecisionStatus.FOCUSED;
+        }
+        return DecisionStatus.UNSURE;
+    }
+
+    private int parseConfidence(JSONObject json) {
+        Object confidenceObj = json.opt("confidence");
+        if (confidenceObj instanceof Number) {
+            return clamp(((Number) confidenceObj).intValue(), 0, 100);
+        }
+        if (confidenceObj != null) {
+            String digits = confidenceObj.toString().replaceAll("[^0-9]", "");
+            if (!digits.isEmpty()) {
+                try {
+                    return clamp(Integer.parseInt(digits), 0, 100);
+                } catch (Exception ignored) {
+                    // fall through
+                }
+            }
+        }
+        return 50;
+    }
+
+    private String extractJsonPayload(String raw) {
+        if (raw == null) return "";
+        String cleaned = raw.trim();
+        if (cleaned.startsWith("```")) {
+            cleaned = cleaned.replaceFirst("^```(?:json)?\\s*", "");
+            cleaned = cleaned.replaceFirst("\\s*```$", "");
+        }
+        int start = cleaned.indexOf('{');
+        int end = cleaned.lastIndexOf('}');
+        if (start >= 0 && end > start) {
+            return cleaned.substring(start, end + 1);
+        }
+        return cleaned;
+    }
+
+    private boolean containsAnyIgnoreCase(String text, String... keywords) {
+        if (text == null || text.isEmpty()) return false;
+        String lower = text.toLowerCase(Locale.ROOT);
+        for (String keyword : keywords) {
+            if (lower.contains(keyword.toLowerCase(Locale.ROOT))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private String buildActivityLabel(String behavior, String foregroundApp) {
+        String activity = (behavior == null || behavior.trim().isEmpty()) ? "未知行为" : behavior.trim();
+        String appInfo = (foregroundApp == null || foregroundApp.isEmpty()) ? "" : getAppLabel(foregroundApp);
+        if (!appInfo.isEmpty() && !activity.contains(appInfo)) {
+            return activity + " (" + appInfo + ")";
+        }
+        return activity;
+    }
+
     // Getters
     public WarningLevel getWarningLevel() { return currentLevel; }
     public String getWarningMessage() { return lastWarningMessage; }
@@ -805,7 +927,7 @@ public class DistractionManager {
     public int getTotalDistractionCount() { return totalDistractionCount; }
     public String getLastAiActivity() { return lastAiActivity; }
     public boolean isLastAiFocused() { return lastAiFocused; }
-    
+
     /**
      * 获取分心历史记录（格式化字符串）
      */
@@ -824,24 +946,24 @@ public class DistractionManager {
         }
         return sb.toString();
     }
-    
+
     /**
      * 清空分心历史
      */
     public void clearHistory() {
         distractionHistoryList.clear();
     }
-    
+
     // === 番茄todo风格：AccessibilityService锁机模式控制 ===
     private java.util.Set<String> currentWhitelist = new java.util.HashSet<>();
-    
+
     /**
      * 设置白名单（从FocusService传入）
      */
     public void setWhitelist(java.util.Set<String> whitelist) {
         this.currentWhitelist = whitelist;
     }
-    
+
     /**
      * 激活锁机界面（分心3次后调用）
      */
@@ -857,7 +979,7 @@ public class DistractionManager {
             Log.w(TAG, "⚠️ AppMonitorService未运行，无法激活锁机界面");
         }
     }
-    
+
     /**
      * 禁用AccessibilityService的锁机模式
      */
@@ -869,8 +991,8 @@ public class DistractionManager {
         }
         isLocked = false;
     }
-    
-    
+
+
     /**
      * 获取应用名称
      */
@@ -883,7 +1005,7 @@ public class DistractionManager {
             return packageName.substring(packageName.lastIndexOf('.') + 1);
         }
     }
-    
+
     /**
      * 保存分心记录到数据库
      */
