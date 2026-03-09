@@ -29,5 +29,7 @@ public class FocusSession {
     public String aiReport;
 
     public int distractionTimeSec;
+
+    public int focusTimeSec;
     public FocusSession() {}
 }

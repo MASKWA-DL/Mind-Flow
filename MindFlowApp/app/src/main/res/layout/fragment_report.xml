@@ -175,11 +175,25 @@
                     android:textSize="16sp"
                     android:textStyle="bold" />
 
-                <com.github.mikephil.charting.charts.PieChart
-                    android:id="@+id/trendChart"
+                <FrameLayout
                     android:layout_width="match_parent"
-                    android:layout_height="250dp"
-                    android:layout_marginTop="12dp" />
+                    android:layout_height="wrap_content">
+
+                    <com.github.mikephil.charting.charts.PieChart
+                        android:id="@+id/pieChart"
+                        android:layout_width="match_parent"
+                        android:layout_height="250dp"
+                        android:layout_marginTop="12dp"
+                        android:visibility="visible" />
+
+                    <com.github.mikephil.charting.charts.BarChart
+                        android:id="@+id/barChart"
+                        android:layout_width="match_parent"
+                        android:layout_height="250dp"
+                        android:layout_marginTop="12dp"
+                        android:visibility="gone" />
+
+                </FrameLayout>
             </LinearLayout>
         </androidx.cardview.widget.CardView>
 

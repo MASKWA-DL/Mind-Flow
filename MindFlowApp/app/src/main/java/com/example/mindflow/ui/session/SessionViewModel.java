@@ -17,10 +17,6 @@ import com.example.mindflow.model.FocusSession;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 
-/**
- * Session ViewModel
- * 管理专注会话的状态和业务逻辑
- */
 public class SessionViewModel extends AndroidViewModel {
 
     private static final String TAG = "MindFlowDB";
@@ -37,26 +33,20 @@ public class SessionViewModel extends AndroidViewModel {
         MindFlowDatabase db = MindFlowDatabase.getInstance(application);
         sessionDao = db.focusSessionDao();
 
-        // 核心修复：如果因为锁屏、切后台导致 ViewModel 被系统销毁重建，
-        // 我们在它刚诞生时，立刻去数据库把之前进行中的任务捞回来，恢复记忆！
+        // 锁屏恢复：捞回进度
         Executors.newSingleThreadExecutor().execute(() -> {
             FocusSession activeSession = sessionDao.getActiveSessionSync();
             if (activeSession != null) {
                 currentSession = activeSession;
-                // 切回主线程更新 UI 绑定的 LiveData
                 new Handler(Looper.getMainLooper()).post(() -> {
                     distractionCount.setValue(activeSession.distractionCount);
                     interventionCount.setValue(activeSession.interventionCount);
                     isSessionActive.setValue(true);
-                    Log.d(TAG, "ViewModel 重建，已从数据库恢复未完成的专注记录！分心次数：" + activeSession.distractionCount);
                 });
             }
         });
     }
 
-    /**
-     * 开始新的专注会话
-     */
     public void startSession(int plannedMinutes, String goalText) {
         currentSession = new FocusSession();
         currentSession.sessionId = UUID.randomUUID().toString();
@@ -67,54 +57,49 @@ public class SessionViewModel extends AndroidViewModel {
         currentSession.isActive = true;
         currentSession.distractionCount = 0;
         currentSession.interventionCount = 0;
-        currentSession.aiReport = ""; // 初始化 AI 报告为空
+        currentSession.distractionTimeSec = 0;
+        currentSession.focusTimeSec = 0;
+        currentSession.aiReport = "";
 
-        // 插入数据库
         Executors.newSingleThreadExecutor().execute(() -> {
             try {
                 long id = sessionDao.insert(currentSession);
                 currentSession.id = id;
-                Log.d(TAG, ">>> Insert 成功！生成的 ID 是: " + id);
             } catch (Exception e) {
-                Log.e(TAG, ">>> Insert 彻底失败，原因在这里: ", e);
+                Log.e(TAG, "Insert 异常: ", e);
             }
         });
 
-        // 重置前端状态
         distractionCount.setValue(0);
         interventionCount.setValue(0);
         focusScore.setValue(null);
         isSessionActive.setValue(true);
     }
 
-    /**
-     * 结束当前专注会话
-     */
-    public void endSession(int actualMinutes, int exactDistractions, int distTimeSec) {
+    // 终极结束逻辑：不信内存，只认数据库！接收纯净的专注/分心秒数
+    public void endSession(int actualMinutes, int distTimeSec, int focusTimeSec) {
         final int currentInterventions = interventionCount.getValue() != null ? interventionCount.getValue() : 0;
 
         Executors.newSingleThreadExecutor().execute(() -> {
             try {
-                FocusSession sessionToUpdate = currentSession;
-                if (sessionToUpdate == null) {
-                    sessionToUpdate = sessionDao.getActiveSessionSync();
-                }
+                FocusSession dbSession = sessionDao.getActiveSessionSync();
+                if (dbSession != null) {
+                    dbSession.endTs = System.currentTimeMillis();
+                    dbSession.actualMin = actualMinutes;
+                    dbSession.isActive = false;
+                    dbSession.interventionCount = currentInterventions;
 
-                if (sessionToUpdate != null) {
-                    sessionToUpdate.endTs = System.currentTimeMillis();
-                    sessionToUpdate.actualMin = actualMinutes;
-                    sessionToUpdate.isActive = false;
-                    sessionToUpdate.interventionCount = currentInterventions;
+                    // 记录真实的秒表时间
+                    dbSession.distractionTimeSec = distTimeSec;
+                    dbSession.focusTimeSec = focusTimeSec;
 
-                    // 存入最真实的分心次数和新加的【分心时长】
-                    sessionToUpdate.distractionCount = exactDistractions;
-                    sessionToUpdate.distractionTimeSec = distTimeSec;
+                    // 读取数据库中绝对真实的累加分心次数
+                    int finalDistractions = dbSession.distractionCount;
+                    int score = calculateFocusScore(actualMinutes, dbSession.plannedMin, finalDistractions);
+                    dbSession.selfFocusScore = score;
 
-                    int score = calculateFocusScore(actualMinutes, sessionToUpdate.plannedMin, exactDistractions);
-                    sessionToUpdate.selfFocusScore = score;
-
-                    sessionDao.update(sessionToUpdate);
-                    Log.d(TAG, ">>> Update 成功！实际专注时间: " + actualMinutes + " 分钟，分心秒数：" + distTimeSec);
+                    sessionDao.update(dbSession);
+                    Log.d(TAG, ">>> 数据库安全更新！实际专注时间: " + actualMinutes + " 分钟，总分心次数锁定: " + finalDistractions + "次");
 
                     new Handler(Looper.getMainLooper()).post(() -> {
                         focusScore.setValue(score);
@@ -125,23 +110,17 @@ public class SessionViewModel extends AndroidViewModel {
                     new Handler(Looper.getMainLooper()).post(() -> isSessionActive.setValue(false));
                 }
             } catch (Exception e) {
-                Log.e(TAG, ">>> Update 彻底抛出异常报错了: ", e);
+                Log.e(TAG, "Update 异常: ", e);
             }
         });
     }
 
-    /**
-     * 获取当前正在进行的 Session ID，给 AI 报告挂载用
-     */
     public long getCurrentSessionId() {
         if (currentSession != null) return currentSession.id;
         FocusSession active = sessionDao.getActiveSessionSync();
         return active != null ? active.id : -1;
     }
 
-    /**
-     * 专门用于接收 AI 分析结果并存入数据库
-     */
     public void saveAiReport(long sessionId, String aiReport) {
         if (sessionId == -1) return;
         Executors.newSingleThreadExecutor().execute(() -> {
@@ -149,48 +128,33 @@ public class SessionViewModel extends AndroidViewModel {
             if (session != null) {
                 session.aiReport = aiReport;
                 sessionDao.update(session);
-                Log.d(TAG, ">>> AI 报告已成功存入数据库！SessionID: " + sessionId);
             }
         });
     }
 
-    /**
-     * 记录一次分心事件
-     * 核心修复：每次分心，立刻存入数据库，绝不信任易挥发的内存！
-     */
+    // 🚨 核心修复：直接操作数据库累加分心次数，绝不丢失！
     public void recordDistraction() {
-        // 1. 先更新 UI 上的数字（为了反馈及时）
-        Integer count = distractionCount.getValue();
-        int nextCount = (count != null ? count + 1 : 1);
-        distractionCount.setValue(nextCount);
-
-        // 2. 核心修复：直接去数据库里“取出来，加1，再存回去”
         Executors.newSingleThreadExecutor().execute(() -> {
-            FocusSession active = sessionDao.getActiveSessionSync();
-            if (active != null) {
-                // 关键点：基于数据库现有的数字累加，而不是基于内存
-                int updatedCount = active.distractionCount + 1;
-                active.distractionCount = updatedCount;
-                sessionDao.update(active);
-                Log.d(TAG, ">>> 数据库分心次数已安全累加至: " + updatedCount);
+            FocusSession activeFromDb = sessionDao.getActiveSessionSync();
+            if (activeFromDb != null) {
+                activeFromDb.distractionCount += 1;
+                sessionDao.update(activeFromDb);
+
+                int trueCount = activeFromDb.distractionCount;
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    distractionCount.setValue(trueCount);
+                });
+                Log.d(TAG, ">>> 坚不可摧的累加！当前数据库分心次数: " + trueCount);
             }
         });
     }
 
-    /**
-     * 记录一次干预事件
-     */
     public void recordIntervention() {
         Integer count = interventionCount.getValue();
         interventionCount.setValue(count != null ? count + 1 : 1);
-        if (currentSession != null) {
-            currentSession.interventionCount++;
-        }
+        if (currentSession != null) currentSession.interventionCount++;
     }
 
-    /**
-     * 简单的评分算法
-     */
     private int calculateFocusScore(int actualMin, int plannedMin, Integer distractions) {
         float completionRate = plannedMin > 0 ? (float) actualMin / plannedMin : 1f;
         int distractionPenalty = distractions != null ? distractions : 0;
@@ -199,7 +163,6 @@ public class SessionViewModel extends AndroidViewModel {
         return Math.round(score);
     }
 
-    // --- Getters ---
     public LiveData<Integer> getDistractionCount() { return distractionCount; }
     public LiveData<Integer> getInterventionCount() { return interventionCount; }
     public LiveData<Integer> getFocusScore() { return focusScore; }

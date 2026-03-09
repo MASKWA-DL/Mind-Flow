@@ -333,43 +333,49 @@ public class SessionFragment extends Fragment {
             focusService.setFocusGoal(confirmedGoal);
             requestScreenCapturePermission();
 
-        }else if (state == FocusService.FocusState.FOCUSING) {
-                int tempMinutes = (int) ((selectedDurationMs - remainingMs) / 60000);
-                if (tempMinutes == 0 && (selectedDurationMs - remainingMs) > 10000) {
-                    tempMinutes = 1;
-                }
+        } else if (state == FocusService.FocusState.FOCUSING) {
+            int tempMinutes = (int) ((selectedDurationMs - remainingMs) / 60000);
+            if (tempMinutes == 0 && (selectedDurationMs - remainingMs) > 10000) {
+                tempMinutes = 1;
+            }
 
-                final int finalActualMinutes = tempMinutes;
-                final String finalGoal = confirmedGoal;
+            final int finalActualMinutes = tempMinutes;
+            final String finalGoal = confirmedGoal;
 
-                // 截获真实次数、真实日志、以及【分心秒数】！
-                final int realDistractionCount = focusService.getWarningCount();
-                final int distTimeSec = focusService.getDistractionTimeSec(); // <--- 新增这行
+            // 提取分心秒数、专注秒数和日志
+            final int distTimeSec = focusService.getDistractionTimeSec();
 
-                DistractionManager dm = new DistractionManager(requireContext());
-                String rawLog = dm.getAiRecognitionLog();
-                final String finalAiLog = (rawLog == null) ? "" : (rawLog.length() > 600 ? rawLog.substring(rawLog.length() - 600) : rawLog);
+            // ⚠️ 就是这里！补上这行，向底层服务索要纯净专注秒数，红线就消失了！
+            final int focusTimeSec = focusService.getFocusTimeSec();
 
-                focusService.stopFocusSession();
-                GlmApiService.resetCancelState();
+            DistractionManager dm = new DistractionManager(requireContext());
+            String rawLog = dm.getAiRecognitionLog();
+            final String finalAiLog = (rawLog == null) ? "" : (rawLog.length() > 600 ? rawLog.substring(rawLog.length() - 600) : rawLog);
 
-                if (viewModel != null) {
-                    // 传 3 个参数给 ViewModel
-                    viewModel.endSession(finalActualMinutes, realDistractionCount, distTimeSec); // <--- 修改这行
+            // 提取完数据后，再去关闭服务
+            focusService.stopFocusSession();
+            GlmApiService.resetCancelState();
 
-                    Executors.newSingleThreadExecutor().execute(() -> {
-                        long id = viewModel.getCurrentSessionId();
-                        com.example.mindflow.model.FocusSession activeSession = com.example.mindflow.database.MindFlowDatabase.getInstance(requireContext()).focusSessionDao().getActiveSessionSync();
-                        int finalDistCount = (activeSession != null) ? activeSession.distractionCount : 0;
-                        generateAndSaveSpecificAiReport(id, finalGoal, finalActualMinutes, finalDistCount, finalAiLog);
-                    });
-                }
+            if (viewModel != null) {
+                // 完美传入 3 个参数：总挂钟分钟数、分心秒数、纯净专注秒数
+                viewModel.endSession(finalActualMinutes, distTimeSec, focusTimeSec);
 
-                clearSavedGoal();
-                updateUI();
-                Toast.makeText(getContext(), "专注结束，AI正在后台生成专属分析报告...", Toast.LENGTH_LONG).show();
+                Executors.newSingleThreadExecutor().execute(() -> {
+                    long id = viewModel.getCurrentSessionId();
 
-            } else if (state == FocusService.FocusState.PAUSED) {
+                    // 让 AI 亲自去数据库读那个真正的、永不丢失的累加值（完美保留之前的防篡改逻辑）
+                    com.example.mindflow.model.FocusSession activeSession = com.example.mindflow.database.MindFlowDatabase.getInstance(requireContext()).focusSessionDao().getActiveSessionSync();
+                    int finalDistCount = (activeSession != null) ? activeSession.distractionCount : 0;
+
+                    generateAndSaveSpecificAiReport(id, finalGoal, finalActualMinutes, finalDistCount, finalAiLog);
+                });
+            }
+
+            clearSavedGoal();
+            updateUI();
+            Toast.makeText(getContext(), "专注结束，AI正在后台生成专属分析报告...", Toast.LENGTH_LONG).show();
+
+        } else if (state == FocusService.FocusState.PAUSED) {
             focusService.resumeFocusSession();
             updateUI();
         }

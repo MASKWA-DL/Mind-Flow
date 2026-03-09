@@ -107,29 +107,31 @@ public class ReportFragment extends Fragment {
 
     // 初始化饼图基本属性
     private void setupPieChartBasic() {
-        binding.trendChart.setUsePercentValues(true);
-        binding.trendChart.getDescription().setEnabled(false);
-        binding.trendChart.setExtraOffsets(5, 10, 5, 5);
+        // 1. 设置饼图
+        binding.pieChart.setUsePercentValues(true);
+        binding.pieChart.getDescription().setEnabled(false);
+        binding.pieChart.setExtraOffsets(5, 10, 5, 5);
+        binding.pieChart.setDragDecelerationFrictionCoef(0.95f);
+        binding.pieChart.setDrawHoleEnabled(true);
+        binding.pieChart.setHoleColor(Color.WHITE);
+        binding.pieChart.setTransparentCircleColor(Color.WHITE);
+        binding.pieChart.setTransparentCircleAlpha(110);
+        binding.pieChart.setHoleRadius(50f);
+        binding.pieChart.setTransparentCircleRadius(55f);
+        binding.pieChart.setDrawCenterText(true);
+        binding.pieChart.setCenterText("时效\n占比");
+        binding.pieChart.setCenterTextSize(16f);
+        binding.pieChart.setRotationAngle(0);
+        binding.pieChart.setRotationEnabled(true);
+        binding.pieChart.setHighlightPerTapEnabled(true);
+        binding.pieChart.getLegend().setEnabled(true);
 
-        binding.trendChart.setDragDecelerationFrictionCoef(0.95f);
-
-        binding.trendChart.setDrawHoleEnabled(true);
-        binding.trendChart.setHoleColor(Color.WHITE);
-        binding.trendChart.setTransparentCircleColor(Color.WHITE);
-        binding.trendChart.setTransparentCircleAlpha(110);
-
-        binding.trendChart.setHoleRadius(50f);
-        binding.trendChart.setTransparentCircleRadius(55f);
-
-        binding.trendChart.setDrawCenterText(true);
-        binding.trendChart.setCenterText("时效\n占比");
-        binding.trendChart.setCenterTextSize(16f);
-
-        binding.trendChart.setRotationAngle(0);
-        binding.trendChart.setRotationEnabled(true);
-        binding.trendChart.setHighlightPerTapEnabled(true);
-
-        binding.trendChart.getLegend().setEnabled(true);
+        // 2. 设置柱状图 (修复没有初始化的报错)
+        binding.barChart.getDescription().setEnabled(false);
+        binding.barChart.setDrawGridBackground(false);
+        binding.barChart.getXAxis().setPosition(com.github.mikephil.charting.components.XAxis.XAxisPosition.BOTTOM);
+        binding.barChart.getXAxis().setDrawGridLines(false);
+        binding.barChart.getAxisRight().setEnabled(false);
     }
 
     private void loadAiLog() {
@@ -141,71 +143,88 @@ public class ReportFragment extends Fragment {
     }
 
     private void observeData() {
-        viewModel.getTotalMinutes().observe(getViewLifecycleOwner(), minutes -> {
-            binding.tvTotalMinutes.setText(String.valueOf(minutes != null ? minutes : 0));
-            updateFocusRate();
-        });
+        // 🚨 核心修复 1：把原来 viewModel.getTotalMinutes().observe 那段代码删掉或注释掉，
+        // 因为那是读挂钟时间的，我们现在要在下面自己算“纯净时间”！
 
         viewModel.getTotalInterventions().observe(getViewLifecycleOwner(), count -> {
             binding.tvTotalInterventions.setText(String.valueOf(count != null ? count : 0));
-            updateFocusRate();
         });
 
-        viewModel.getPositiveFeedbackRate().observe(getViewLifecycleOwner(), rate -> {
-            if (rate != null && rate > 0) {
-                binding.tvPositiveFeedback.setText(String.format("%.0f%%", rate * 100));
-            }
-        });
-
-        viewModel.getDistractionHistory().observe(getViewLifecycleOwner(), history -> {
-            if (history != null && !history.isEmpty()) {
-                binding.tvDistractionList.setText(history);
+        viewModel.getChartData().observe(getViewLifecycleOwner(), chartPoints -> {
+            if ("今日".equals(currentPeriodLabel)) {
+                binding.pieChart.setVisibility(View.VISIBLE);
+                binding.barChart.setVisibility(View.GONE);
+                binding.tvChartTitle.setText("今日时间分配占比");
             } else {
-                binding.tvDistractionList.setText("暂无分心记录，继续保持！");
+                binding.pieChart.setVisibility(View.GONE);
+                binding.barChart.setVisibility(View.VISIBLE);
+                binding.tvChartTitle.setText(currentPeriodLabel + "专注时长分布");
+                renderBarChart(chartPoints);
             }
         });
 
-        // 监听列表变化，同时更新列表和饼图
         viewModel.getSessionList().observe(getViewLifecycleOwner(), sessions -> {
             if (sessions == null || sessions.isEmpty()) {
                 binding.tvSessionListTitle.setVisibility(View.GONE);
                 binding.sessionRecyclerView.setVisibility(View.GONE);
-                binding.trendChart.clear();
-                binding.trendChart.setNoDataText("暂无专注数据，饼图睡着了");
+                binding.pieChart.clear();
+
+                binding.tvTotalMinutes.setText("0");
+                binding.tvPositiveFeedback.setText("--");
             } else {
                 binding.tvSessionListTitle.setVisibility(View.VISIBLE);
                 binding.sessionRecyclerView.setVisibility(View.VISIBLE);
                 sessionAdapter.setSessions(sessions);
 
-                // 根据当前列表数据计算专注和分心的时间比例并画图
-                updatePieChart(sessions);
+                // 🚨 核心修复 2：亲自计算绝对纯净的 AI 专注/分心总时长
+                long totalFocusSec = 0;
+                long totalDistSec = 0;
+                for (FocusSession s : sessions) {
+                    totalFocusSec += s.focusTimeSec;
+                    totalDistSec += s.distractionTimeSec;
+                }
+
+                // 强制更新顶部大字号卡片：“纯净专注分钟数”
+                int pureFocusMinutes = (int) (totalFocusSec / 60);
+                binding.tvTotalMinutes.setText(String.valueOf(pureFocusMinutes));
+
+                // 强制更新右上角卡片：“真实专注率”
+                if (totalFocusSec + totalDistSec == 0) {
+                    binding.tvPositiveFeedback.setText("--");
+                } else {
+                    float rate = (float) totalFocusSec / (totalFocusSec + totalDistSec) * 100;
+                    binding.tvPositiveFeedback.setText(String.format("%.0f%%", rate));
+                }
+
+                if ("今日".equals(currentPeriodLabel)) {
+                    updatePieChart(sessions);
+                }
             }
         });
     }
 
+    // 渲染饼图逻辑
     // 渲染饼图逻辑
     private void updatePieChart(List<FocusSession> sessions) {
         long totalFocusSec = 0;
         long totalDistSec = 0;
 
         for (FocusSession s : sessions) {
-            totalFocusSec += (s.actualMin * 60L); // 专注时间转为秒
-            totalDistSec += s.distractionTimeSec; // 分心时间（秒）
+            totalFocusSec += s.focusTimeSec;
+            totalDistSec += s.distractionTimeSec;
         }
 
         // 如果都没时间，清空图表
         if (totalFocusSec == 0 && totalDistSec == 0) {
-            binding.trendChart.clear();
+            binding.pieChart.clear(); // 这里改成了 pieChart
             return;
         }
 
         List<PieEntry> entries = new ArrayList<>();
 
-        // 加入专注时间
         if (totalFocusSec > 0) {
             entries.add(new PieEntry(totalFocusSec, "专注区"));
         }
-        // 加入分心时间
         if (totalDistSec > 0) {
             entries.add(new PieEntry(totalDistSec, "游离区"));
         }
@@ -214,21 +233,20 @@ public class ReportFragment extends Fragment {
         dataSet.setSliceSpace(3f);
         dataSet.setSelectionShift(5f);
 
-        // 设置专属配色
         ArrayList<Integer> colors = new ArrayList<>();
-        colors.add(getResources().getColor(R.color.primary, null)); // 蓝色代表专注
-        colors.add(getResources().getColor(R.color.warning, null)); // 橙色/红色代表分心
+        colors.add(getResources().getColor(R.color.primary, null));
+        colors.add(getResources().getColor(R.color.warning, null));
         dataSet.setColors(colors);
 
         PieData data = new PieData(dataSet);
-        data.setValueFormatter(new PercentFormatter(binding.trendChart));
+        data.setValueFormatter(new PercentFormatter(binding.pieChart)); // 改成了 pieChart
         data.setValueTextSize(14f);
         data.setValueTextColor(Color.WHITE);
 
-        binding.trendChart.setData(data);
-        binding.trendChart.highlightValues(null); // 撤销所有高亮
-        binding.trendChart.animateY(1400); // 添加超帅的弹入动画
-        binding.trendChart.invalidate();
+        binding.pieChart.setData(data); // 改成了 pieChart
+        binding.pieChart.highlightValues(null);
+        binding.pieChart.animateY(1400);
+        binding.pieChart.invalidate();
     }
 
     private void updateFocusRate() {
@@ -241,6 +259,26 @@ public class ReportFragment extends Fragment {
         } else {
             binding.tvPositiveFeedback.setText("--");
         }
+    }
+
+    private void renderBarChart(List<com.example.mindflow.ui.report.ReportViewModel.ChartPoint> chartPoints) {
+        if (chartPoints == null || chartPoints.isEmpty()) {
+            binding.barChart.clear();
+            return;
+        }
+        List<com.github.mikephil.charting.data.BarEntry> entries = new ArrayList<>();
+        List<String> labels = new ArrayList<>();
+        for (int i = 0; i < chartPoints.size(); i++) {
+            entries.add(new com.github.mikephil.charting.data.BarEntry(i, chartPoints.get(i).value));
+            labels.add(chartPoints.get(i).label);
+        }
+        com.github.mikephil.charting.data.BarDataSet dataSet = new com.github.mikephil.charting.data.BarDataSet(entries, "分钟");
+        dataSet.setColor(getResources().getColor(R.color.primary, null));
+        com.github.mikephil.charting.data.BarData barData = new com.github.mikephil.charting.data.BarData(dataSet);
+        binding.barChart.setData(barData);
+        binding.barChart.getXAxis().setValueFormatter(new com.github.mikephil.charting.formatter.IndexAxisValueFormatter(labels));
+        binding.barChart.animateY(800);
+        binding.barChart.invalidate();
     }
 
     private void generateAiSummary() {
@@ -351,9 +389,17 @@ public class ReportFragment extends Fragment {
         binding = null;
     }
 
+    // 将秒转换成分秒格式 (加在这个方法上面)
+    private String formatSeconds(int totalSecs) {
+        int m = totalSecs / 60;
+        int s = totalSecs % 60;
+        if (m > 0) return m + "分 " + s + "秒";
+        return s + "秒";
+    }
+
     private void showSessionDetailDialog(FocusSession session) {
-        float rate = Math.max(0, 100 - session.distractionCount * 5);
-        String rateStr = String.format("%.0f%%", rate);
+        long totalActiveSec = session.focusTimeSec + session.distractionTimeSec;
+        String rateStr = totalActiveSec == 0 ? "0%" : String.format("%.0f%%", (float)session.focusTimeSec / totalActiveSec * 100);
 
         String report = session.aiReport;
         if (report == null || report.trim().isEmpty()) {
@@ -361,10 +407,11 @@ public class ReportFragment extends Fragment {
         }
 
         String detailMessage = "🎯 专注目标：" + (session.goalText != null ? session.goalText : "无特定目标") + "\n\n" +
-                "⏱️ 专注时长：" + session.actualMin + " 分钟\n" +
-                "⏳ 分心时长：" + session.distractionTimeSec + " 秒\n" +
+                "⏱️ 挂钟耗时：" + session.actualMin + " 分钟 (含锁屏)\n" +
+                "✅ 净专注区：" + formatSeconds(session.focusTimeSec) + "\n" +
+                "⏳ 游离时长：" + formatSeconds(session.distractionTimeSec) + "\n" +
                 "⚠️ 分心次数：" + session.distractionCount + " 次\n" +
-                "📊 专注率：" + rateStr + "\n\n" +
+                "📊 纯净专注率：" + rateStr + "\n\n" +
                 "🤖 专属 AI 报告：\n" + report;
 
         new AlertDialog.Builder(requireContext())
@@ -393,16 +440,19 @@ public class ReportFragment extends Fragment {
         @Override
         public void onBindViewHolder(@NonNull ViewHolder holder, int position) {
             FocusSession session = sessionList.get(position);
-
             holder.tvGoal.setText(session.goalText != null && !session.goalText.isEmpty() ? session.goalText : "无特定目标");
+            holder.tvTime.setText(timeFormat.format(new Date(session.startTs)) + " - " + timeFormat.format(new Date(session.endTs)));
 
-            String startTime = timeFormat.format(new Date(session.startTs));
-            String endTime = timeFormat.format(new Date(session.endTs));
-            holder.tvTime.setText(startTime + " - " + endTime);
+            // 🚨 核心修复 3：列表展示纯净专注时间，而不是糊弄人的挂钟时间
+            int m = session.focusTimeSec / 60;
+            int s = session.focusTimeSec % 60;
+            if (m > 0) {
+                holder.tvDuration.setText("净专注 " + m + "分" + s + "秒");
+            } else {
+                holder.tvDuration.setText("净专注 " + s + "秒");
+            }
 
-            holder.tvDuration.setText(session.actualMin + " min");
             holder.tvDistractions.setText("分心: " + session.distractionCount);
-
             holder.itemView.setOnClickListener(v -> showSessionDetailDialog(session));
         }
 

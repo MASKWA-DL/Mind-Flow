@@ -96,6 +96,8 @@ public class FocusService extends Service {
     // === 新增：分心时间统计变量 ===
     private boolean isCurrentlyDistracted = false; // 当前是否处于分心状态
     private int distractionTimeSec = 0;            // 分心总秒数
+    private int focusTimeSec = 0;
+    private boolean isScreenOff = false; // 屏幕物理状态
 
     private final MediaProjection.Callback mediaProjectionCallback = new MediaProjection.Callback() {
         @Override
@@ -252,9 +254,11 @@ public class FocusService extends Service {
         this.focusStartTime = System.currentTimeMillis();
         this.currentState = FocusState.FOCUSING;
 
-        // === 新增：开始专注时，清零分心秒表和状态 ===
+        // 重置秒表
         this.distractionTimeSec = 0;
+        this.focusTimeSec = 0;
         this.isCurrentlyDistracted = false;
+        this.isScreenOff = false;
 
         distractionManager.reset();
         distractionManager.enableMonitoring();
@@ -396,9 +400,14 @@ public class FocusService extends Service {
 
         remainingMs -= 1000;
 
-        // === 新增：如果当前处于分心状态，分心秒数 +1 ===
-        if (isCurrentlyDistracted) {
-            distractionTimeSec++;
+        // === 终极纯净时间分配算法 ===
+        // 只有在【没按电源键息屏】且【没有被关进惩罚锁机页面】的情况下，才分配时间！
+        if (!isScreenOff && !isMonitoringPaused) {
+            if (isCurrentlyDistracted) {
+                distractionTimeSec++; // AI判定为分心的状态下，累加分心秒数
+            } else {
+                focusTimeSec++;       // AI判定为专注的状态下，累加专注秒数
+            }
         }
 
         if (remainingMs <= 0) {
@@ -592,9 +601,11 @@ public class FocusService extends Service {
                 mainHandler.post(() -> {
                     if (currentState != FocusState.FOCUSING) return;
 
-                    boolean isDistracted = distractionManager.analyzeAndCheck(result, currentForegroundApp, whitelist);
-                    // === 新增：同步分心状态 ===
-                    isCurrentlyDistracted = isDistracted;
+                    // shouldWarn 只是用来判断要不要弹警告窗的
+                    boolean shouldWarn = distractionManager.analyzeAndCheck(result, currentForegroundApp, whitelist);
+
+                    // 🚨 核心修复：秒表状态必须绝对服从 AI 的判断，不管弹不弹警告！
+                    isCurrentlyDistracted = !distractionManager.isLastAiFocused();
 
                     Intent aiIntent = new Intent(ACTION_AI_RESULT);
                     aiIntent.putExtra("vision", result);
@@ -604,7 +615,7 @@ public class FocusService extends Service {
                     aiIntent.putExtra("current_app", currentForegroundApp);
                     LocalBroadcastManager.getInstance(FocusService.this).sendBroadcast(aiIntent);
 
-                    if (isDistracted) handleDistraction();
+                    if (shouldWarn) handleDistraction();
                 });
             }
 
@@ -915,11 +926,15 @@ public class FocusService extends Service {
             @Override
             public void onSuccess(String result) {
                 if (currentState != FocusState.FOCUSING) return;
+
                 mainHandler.post(() -> {
                     if (currentState != FocusState.FOCUSING) return;
-                    boolean isDistracted = distractionManager.analyzeAndCheck(result, packageName, whitelist);
-                    // === 新增：同步分心状态 ===
-                    isCurrentlyDistracted = isDistracted;
+
+                    // shouldWarn 只是用来判断要不要弹警告窗的
+                    boolean shouldWarn = distractionManager.analyzeAndCheck(result, packageName, whitelist);
+
+                    // 🚨 核心修复：秒表状态必须绝对服从 AI 的判断！
+                    isCurrentlyDistracted = !distractionManager.isLastAiFocused();
 
                     Intent aiIntent = new Intent(ACTION_AI_RESULT);
                     aiIntent.putExtra("vision", result);
@@ -928,9 +943,11 @@ public class FocusService extends Service {
                     aiIntent.putExtra("goal", focusGoal);
                     aiIntent.putExtra("current_app", packageName);
                     LocalBroadcastManager.getInstance(FocusService.this).sendBroadcast(aiIntent);
-                    if (isDistracted) handleDistraction();
+
+                    if (shouldWarn) handleDistraction();
                 });
             }
+
 
             @Override
             public void onFailure(String error) {
@@ -1082,4 +1099,7 @@ public class FocusService extends Service {
 
     // === 新增：提供分心秒数供外部调用 ===
     public int getDistractionTimeSec() { return distractionTimeSec; }
+
+    // ⚠️ 检查这里！加上这行方法，Fragment 才能拿到数据
+    public int getFocusTimeSec() { return focusTimeSec; }
 }
