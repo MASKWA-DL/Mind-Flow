@@ -334,12 +334,12 @@ public class SessionFragment extends Fragment {
             requestScreenCapturePermission();
 
         } else if (state == FocusService.FocusState.FOCUSING) {
-            int tempMinutes = (int) ((selectedDurationMs - remainingMs) / 60000);
-            if (tempMinutes == 0 && (selectedDurationMs - remainingMs) > 10000) {
-                tempMinutes = 1;
-            }
+            //int tempMinutes = (int) ((selectedDurationMs - remainingMs) / 60000);
+            //if (tempMinutes == 0 && (selectedDurationMs - remainingMs) > 10000) {
+               // tempMinutes = 1;
+            //}
 
-            final int finalActualMinutes = tempMinutes;
+            final int finalActualMinutes = (int) ((selectedDurationMs - remainingMs) / 60000);
             final String finalGoal = confirmedGoal;
 
             // 提取分心秒数、专注秒数和日志

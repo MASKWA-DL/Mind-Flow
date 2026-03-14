@@ -30,6 +30,14 @@ import com.github.mikephil.charting.data.PieDataSet;
 import com.github.mikephil.charting.data.PieEntry;
 import com.github.mikephil.charting.formatter.PercentFormatter;
 
+// 引入折线图需要的包
+import com.github.mikephil.charting.components.XAxis;
+import com.github.mikephil.charting.components.YAxis;
+import com.github.mikephil.charting.data.Entry;
+import com.github.mikephil.charting.data.LineData;
+import com.github.mikephil.charting.data.LineDataSet;
+import com.github.mikephil.charting.formatter.IndexAxisValueFormatter;
+
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -62,11 +70,11 @@ public class ReportFragment extends Fragment {
         distractionManager = new DistractionManager(requireContext());
 
         setupUI();
-        setupPieChartBasic();
+        setupPieChartBasic(); // 名字没改，但里面配置了饼图和折线图
         observeData();
         loadAiLog();
 
-        viewModel.loadData(ReportViewModel.Period.TODAY);
+
     }
 
     private void setupUI() {
@@ -105,7 +113,7 @@ public class ReportFragment extends Fragment {
         });
     }
 
-    // 初始化饼图基本属性
+    // 🚨 修复一：替换图表初始化（加入折线图基础配置）
     private void setupPieChartBasic() {
         // 1. 设置饼图
         binding.pieChart.setUsePercentValues(true);
@@ -126,12 +134,15 @@ public class ReportFragment extends Fragment {
         binding.pieChart.setHighlightPerTapEnabled(true);
         binding.pieChart.getLegend().setEnabled(true);
 
-        // 2. 设置柱状图 (修复没有初始化的报错)
-        binding.barChart.getDescription().setEnabled(false);
-        binding.barChart.setDrawGridBackground(false);
-        binding.barChart.getXAxis().setPosition(com.github.mikephil.charting.components.XAxis.XAxisPosition.BOTTOM);
-        binding.barChart.getXAxis().setDrawGridLines(false);
-        binding.barChart.getAxisRight().setEnabled(false);
+        // 2. 完美替换：折线图初始配置
+        binding.lineChart.getDescription().setEnabled(false);
+        binding.lineChart.setDrawGridBackground(false);
+        binding.lineChart.getAxisRight().setEnabled(false); // 隐藏右侧 Y 轴
+
+        XAxis xAxis = binding.lineChart.getXAxis();
+        xAxis.setPosition(XAxis.XAxisPosition.BOTTOM);
+        xAxis.setDrawGridLines(false);
+        xAxis.setGranularity(1f); // 保证缩放时 X 轴标签不重复
     }
 
     private void loadAiLog() {
@@ -142,10 +153,8 @@ public class ReportFragment extends Fragment {
         binding.tvAiLog.setText(logCount > 0 ? logContent : "暂无AI识别记录");
     }
 
+    // 🚨 修复二：观察数据变化时，切换成 lineChart
     private void observeData() {
-        // 🚨 核心修复 1：把原来 viewModel.getTotalMinutes().observe 那段代码删掉或注释掉，
-        // 因为那是读挂钟时间的，我们现在要在下面自己算“纯净时间”！
-
         viewModel.getTotalInterventions().observe(getViewLifecycleOwner(), count -> {
             binding.tvTotalInterventions.setText(String.valueOf(count != null ? count : 0));
         });
@@ -153,13 +162,13 @@ public class ReportFragment extends Fragment {
         viewModel.getChartData().observe(getViewLifecycleOwner(), chartPoints -> {
             if ("今日".equals(currentPeriodLabel)) {
                 binding.pieChart.setVisibility(View.VISIBLE);
-                binding.barChart.setVisibility(View.GONE);
+                binding.lineChart.setVisibility(View.GONE);
                 binding.tvChartTitle.setText("今日时间分配占比");
             } else {
                 binding.pieChart.setVisibility(View.GONE);
-                binding.barChart.setVisibility(View.VISIBLE);
-                binding.tvChartTitle.setText(currentPeriodLabel + "专注时长分布");
-                renderBarChart(chartPoints);
+                binding.lineChart.setVisibility(View.VISIBLE);
+                binding.tvChartTitle.setText(currentPeriodLabel + "专注时长趋势");
+                renderLineChart(chartPoints); // 调用画折线图的方法
             }
         });
 
@@ -176,7 +185,6 @@ public class ReportFragment extends Fragment {
                 binding.sessionRecyclerView.setVisibility(View.VISIBLE);
                 sessionAdapter.setSessions(sessions);
 
-                // 🚨 核心修复 2：亲自计算绝对纯净的 AI 专注/分心总时长
                 long totalFocusSec = 0;
                 long totalDistSec = 0;
                 for (FocusSession s : sessions) {
@@ -184,11 +192,9 @@ public class ReportFragment extends Fragment {
                     totalDistSec += s.distractionTimeSec;
                 }
 
-                // 强制更新顶部大字号卡片：“纯净专注分钟数”
                 int pureFocusMinutes = (int) (totalFocusSec / 60);
                 binding.tvTotalMinutes.setText(String.valueOf(pureFocusMinutes));
 
-                // 强制更新右上角卡片：“真实专注率”
                 if (totalFocusSec + totalDistSec == 0) {
                     binding.tvPositiveFeedback.setText("--");
                 } else {
@@ -203,8 +209,6 @@ public class ReportFragment extends Fragment {
         });
     }
 
-    // 渲染饼图逻辑
-    // 渲染饼图逻辑
     private void updatePieChart(List<FocusSession> sessions) {
         long totalFocusSec = 0;
         long totalDistSec = 0;
@@ -214,9 +218,8 @@ public class ReportFragment extends Fragment {
             totalDistSec += s.distractionTimeSec;
         }
 
-        // 如果都没时间，清空图表
         if (totalFocusSec == 0 && totalDistSec == 0) {
-            binding.pieChart.clear(); // 这里改成了 pieChart
+            binding.pieChart.clear();
             return;
         }
 
@@ -239,11 +242,11 @@ public class ReportFragment extends Fragment {
         dataSet.setColors(colors);
 
         PieData data = new PieData(dataSet);
-        data.setValueFormatter(new PercentFormatter(binding.pieChart)); // 改成了 pieChart
+        data.setValueFormatter(new PercentFormatter(binding.pieChart));
         data.setValueTextSize(14f);
         data.setValueTextColor(Color.WHITE);
 
-        binding.pieChart.setData(data); // 改成了 pieChart
+        binding.pieChart.setData(data);
         binding.pieChart.highlightValues(null);
         binding.pieChart.animateY(1400);
         binding.pieChart.invalidate();
@@ -261,24 +264,64 @@ public class ReportFragment extends Fragment {
         }
     }
 
-    private void renderBarChart(List<com.example.mindflow.ui.report.ReportViewModel.ChartPoint> chartPoints) {
+    // 🚨 修复三：删掉 renderBarChart，替换为超帅的平滑曲线图渲染逻辑
+    private void renderLineChart(List<ReportViewModel.ChartPoint> chartPoints) {
         if (chartPoints == null || chartPoints.isEmpty()) {
-            binding.barChart.clear();
+            binding.lineChart.clear();
             return;
         }
-        List<com.github.mikephil.charting.data.BarEntry> entries = new ArrayList<>();
+
+        List<Entry> entries = new ArrayList<>();
         List<String> labels = new ArrayList<>();
+        float maxValue = 0f;
+
+        // 遍历收集数据，找最大值
         for (int i = 0; i < chartPoints.size(); i++) {
-            entries.add(new com.github.mikephil.charting.data.BarEntry(i, chartPoints.get(i).value));
+            float val = chartPoints.get(i).value;
+            entries.add(new Entry(i, val));
             labels.add(chartPoints.get(i).label);
+            if (val > maxValue) {
+                maxValue = val;
+            }
         }
-        com.github.mikephil.charting.data.BarDataSet dataSet = new com.github.mikephil.charting.data.BarDataSet(entries, "分钟");
-        dataSet.setColor(getResources().getColor(R.color.primary, null));
-        com.github.mikephil.charting.data.BarData barData = new com.github.mikephil.charting.data.BarData(dataSet);
-        binding.barChart.setData(barData);
-        binding.barChart.getXAxis().setValueFormatter(new com.github.mikephil.charting.formatter.IndexAxisValueFormatter(labels));
-        binding.barChart.animateY(800);
-        binding.barChart.invalidate();
+
+        LineDataSet dataSet = new LineDataSet(entries, "净专注(分钟)");
+        int primaryColor = getResources().getColor(R.color.primary, null);
+
+        dataSet.setColor(primaryColor);
+        dataSet.setCircleColor(primaryColor);
+        dataSet.setLineWidth(2.5f);
+        dataSet.setCircleRadius(4f);
+        dataSet.setDrawValues(false);      // 隐藏节点数字，以免拥挤
+        dataSet.setMode(LineDataSet.Mode.HORIZONTAL_BEZIER); // 开启水平贝塞尔曲线（平滑且绝对精准，绝不超过真实最高点）
+
+        // 底部渐变填充
+        dataSet.setDrawFilled(true);
+        dataSet.setFillColor(primaryColor);
+        dataSet.setFillAlpha(40);
+
+        LineData lineData = new LineData(dataSet);
+        binding.lineChart.setData(lineData);
+
+        XAxis xAxis = binding.lineChart.getXAxis();
+        xAxis.setValueFormatter(new IndexAxisValueFormatter(labels));
+        if (labels.size() > 12) {
+            xAxis.setLabelCount(6, false);
+        } else {
+            xAxis.setLabelCount(labels.size(), false);
+        }
+
+        // 动态留白逻辑：最大值提 20%
+        YAxis yAxisLeft = binding.lineChart.getAxisLeft();
+        yAxisLeft.setAxisMinimum(0f);
+        if (maxValue > 0) {
+            yAxisLeft.setAxisMaximum(maxValue * 1.2f);
+        } else {
+            yAxisLeft.setAxisMaximum(10f); // 无数据时默认高度
+        }
+
+        binding.lineChart.animateX(1000);
+        binding.lineChart.invalidate();
     }
 
     private void generateAiSummary() {
@@ -371,11 +414,16 @@ public class ReportFragment extends Fragment {
     public void onResume() {
         super.onResume();
         loadAiLog();
+
+        // 🚨 终极修复：彻底干掉系统的自动记忆！
+        // 每次进入报告页，强行把高亮按钮按在“今日”上，并且只加载今日数据！
+        if (binding != null) {
+            binding.chipGroupPeriod.check(R.id.chipToday); // UI 强制选中“今日”
+            currentPeriodLabel = "今日";                     // 逻辑强制重置为“今日”
+        }
+
         if (viewModel != null) {
-            if ("今日".equals(currentPeriodLabel)) viewModel.loadData(ReportViewModel.Period.TODAY);
-            else if ("本周".equals(currentPeriodLabel)) viewModel.loadData(ReportViewModel.Period.WEEK);
-            else if ("本月".equals(currentPeriodLabel)) viewModel.loadData(ReportViewModel.Period.MONTH);
-            else if ("本年".equals(currentPeriodLabel)) viewModel.loadData(ReportViewModel.Period.YEAR);
+            viewModel.loadData(ReportViewModel.Period.TODAY); // 永远只画饼图作为开局
         }
     }
 
@@ -389,7 +437,6 @@ public class ReportFragment extends Fragment {
         binding = null;
     }
 
-    // 将秒转换成分秒格式 (加在这个方法上面)
     private String formatSeconds(int totalSecs) {
         int m = totalSecs / 60;
         int s = totalSecs % 60;
@@ -401,17 +448,13 @@ public class ReportFragment extends Fragment {
         long totalActiveSec = session.focusTimeSec + session.distractionTimeSec;
         String rateStr = totalActiveSec == 0 ? "0%" : String.format("%.0f%%", (float)session.focusTimeSec / totalActiveSec * 100);
 
-        String report = session.aiReport;
-        if (report == null || report.trim().isEmpty()) {
-            report = "AI 报告还在生成中，或者由于网络原因未成功生成。请稍后再来看看哦！";
-        }
+        String report = (session.aiReport == null || session.aiReport.trim().isEmpty()) ? "暂无AI分析报告" : session.aiReport;
 
-        String detailMessage = "🎯 专注目标：" + (session.goalText != null ? session.goalText : "无特定目标") + "\n\n" +
-                "⏱️ 挂钟耗时：" + session.actualMin + " 分钟 (含锁屏)\n" +
-                "✅ 净专注区：" + formatSeconds(session.focusTimeSec) + "\n" +
-                "⏳ 游离时长：" + formatSeconds(session.distractionTimeSec) + "\n" +
-                "⚠️ 分心次数：" + session.distractionCount + " 次\n" +
-                "📊 纯净专注率：" + rateStr + "\n\n" +
+        String detailMessage = "🎯 专注目标：" + (session.goalText != null ? session.goalText : "无") + "\n\n" +
+                "✅ AI 净专注：" + formatSeconds(session.focusTimeSec) + "\n" +
+                "⏳ AI 游离时长：" + formatSeconds(session.distractionTimeSec) + "\n" +
+                "⚠️ 分心记录次数：" + session.distractionCount + " 次\n" +
+                "📊 净专注率：" + rateStr + "\n\n" +
                 "🤖 专属 AI 报告：\n" + report;
 
         new AlertDialog.Builder(requireContext())
@@ -443,7 +486,6 @@ public class ReportFragment extends Fragment {
             holder.tvGoal.setText(session.goalText != null && !session.goalText.isEmpty() ? session.goalText : "无特定目标");
             holder.tvTime.setText(timeFormat.format(new Date(session.startTs)) + " - " + timeFormat.format(new Date(session.endTs)));
 
-            // 🚨 核心修复 3：列表展示纯净专注时间，而不是糊弄人的挂钟时间
             int m = session.focusTimeSec / 60;
             int s = session.focusTimeSec % 60;
             if (m > 0) {

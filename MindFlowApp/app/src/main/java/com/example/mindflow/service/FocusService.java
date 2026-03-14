@@ -282,12 +282,43 @@ public class FocusService extends Service {
         if (screenAnalysisTask != null) screenAnalysisTask.cancel(false);
         if (watchdogTask != null) watchdogTask.cancel(false);
 
+        // 心跳和看门狗依然保持固定频率
         timerTask = executor.scheduleAtFixedRate(this::safeTimerTick, 0, 1, TimeUnit.SECONDS);
-        screenAnalysisTask = executor.scheduleAtFixedRate(this::safeAnalyzeScreen, 5, 15, TimeUnit.SECONDS);
         watchdogTask = executor.scheduleAtFixedRate(this::watchdogCheck, 5, 5, TimeUnit.SECONDS);
+
+        // 【关键修改】删掉旧的写死的 15 秒定时器，启动薛定谔动态调度！
+        scheduleNextAiCheck();
 
         broadcastStateChange();
         broadcastInitialAiStatus();
+    }
+
+    /**
+     * 【核心防作弊】薛定谔的保安：动态调度下一次 AI 巡逻时间
+     */
+    private void scheduleNextAiCheck() {
+        // 只有在专注状态下才继续循环
+        if (currentState != FocusState.FOCUSING) return;
+
+        // 默认和平时期，15秒看一次（省电）
+        long nextDelayMs = 15000;
+
+        // 如果发现用户正在摸鱼，或者正处于 30 秒的“考察期”
+        if (distractionManager != null && distractionManager.isInProbationOrDanger()) {
+            // 高压严打期：3000 ~ 8000 毫秒之间随机抽查，不留任何卡 Bug 的死角！
+            nextDelayMs = 3000 + (long)(Math.random() * 5000);
+            Log.d(TAG, "🕵️‍♂️ 进入高频随机巡逻模式，下次检查延迟: " + nextDelayMs + "ms");
+        } else {
+            Log.d(TAG, "☕ 和平时期，保安 15 秒后再来");
+        }
+
+        // 安排下一次任务（用 schedule 而不是 scheduleAtFixedRate）
+        screenAnalysisTask = executor.schedule(() -> {
+            safeAnalyzeScreen(); // 看一眼屏幕
+
+            // 【灵魂一步】看完之后，再次呼叫自己，安排下一次！形成无限的动态循环链
+            scheduleNextAiCheck();
+        }, nextDelayMs, TimeUnit.MILLISECONDS);
     }
 
     public void stopFocusSession() {
@@ -339,11 +370,17 @@ public class FocusService extends Service {
 
     public void resumeFocusSession() {
         if (currentState != FocusState.PAUSED) return;
+
         currentState = FocusState.FOCUSING;
         watchdogRestartCount = 0;
+
+        // 心跳和看门狗依然保持 1 秒和 5 秒的固定频率
         timerTask = executor.scheduleAtFixedRate(this::safeTimerTick, 0, 1, TimeUnit.SECONDS);
-        screenAnalysisTask = executor.scheduleAtFixedRate(this::safeAnalyzeScreen, 5, 15, TimeUnit.SECONDS);
         watchdogTask = executor.scheduleAtFixedRate(this::watchdogCheck, 5, 5, TimeUnit.SECONDS);
+
+        // 【关键修改】删掉旧的 scheduleAtFixedRate，重新激活薛定谔的动态巡逻！
+        scheduleNextAiCheck();
+
         broadcastStateChange();
     }
 
@@ -386,7 +423,9 @@ public class FocusService extends Service {
             watchdogRestartCount++;
             if (screenAnalysisTask != null) screenAnalysisTask.cancel(false);
             GlmApiService.resetCancelState();
-            screenAnalysisTask = executor.scheduleAtFixedRate(this::safeAnalyzeScreen, 1, 15, TimeUnit.SECONDS);
+
+            scheduleNextAiCheck();
+
             lastAnalysisTime = now;
         }
 
@@ -400,13 +439,21 @@ public class FocusService extends Service {
 
         remainingMs -= 1000;
 
-        // === 终极纯净时间分配算法 ===
-        // 只有在【没按电源键息屏】且【没有被关进惩罚锁机页面】的情况下，才分配时间！
+        // === 1. 让新版漏桶状态机接管心跳 ===
+        if (distractionManager != null) {
+            boolean phaseAdvanced = distractionManager.tickStateMachine();
+            if (phaseAdvanced) {
+                // 如果水桶满了溢出，立刻触发展示弹窗，以及往数据库里增加报告次数！
+                mainHandler.post(this::handleDistraction);
+            }
+        }
+
+        // === 2. 纯净时间分配算法（服从考官鉴定结果） ===
         if (!isScreenOff && !isMonitoringPaused) {
             if (isCurrentlyDistracted) {
-                distractionTimeSec++; // AI判定为分心的状态下，累加分心秒数
+                distractionTimeSec++;
             } else {
-                focusTimeSec++;       // AI判定为专注的状态下，累加专注秒数
+                focusTimeSec++;
             }
         }
 
@@ -426,6 +473,7 @@ public class FocusService extends Service {
             if (nm != null) nm.notify(NOTIFICATION_ID, createFocusNotification());
         });
 
+        // 将总分心次数随着 Broadcast 传给 Fragment 的 UI
         Intent intent = new Intent(ACTION_TIMER_TICK);
         intent.putExtra("remaining_ms", remainingMs);
         intent.putExtra("total_ms", focusDurationMs);
@@ -568,7 +616,6 @@ public class FocusService extends Service {
             aiIntent.putExtra("current_app", pkg);
             LocalBroadcastManager.getInstance(this).sendBroadcast(aiIntent);
 
-            if (!isFocused) handleDistraction();
         });
     }
 
@@ -601,21 +648,20 @@ public class FocusService extends Service {
                 mainHandler.post(() -> {
                     if (currentState != FocusState.FOCUSING) return;
 
-                    // shouldWarn 只是用来判断要不要弹警告窗的
-                    boolean shouldWarn = distractionManager.analyzeAndCheck(result, currentForegroundApp, whitelist);
+                    // 1. 呼叫双源考官进行鉴定，并将结果直接赋值给 Service 的秒表！
+                    // 🚨 注意：新版 analyzeAndCheck 返回的是 "是否分心"，不再是 "是否弹窗"
+                    isCurrentlyDistracted = distractionManager.analyzeAndCheck(result, currentForegroundApp, whitelist);
 
-                    // 🚨 核心修复：秒表状态必须绝对服从 AI 的判断，不管弹不弹警告！
-                    isCurrentlyDistracted = !distractionManager.isLastAiFocused();
-
+                    // 2. 发送广播，把底层 AI 看到了什么告诉 UI 界面
                     Intent aiIntent = new Intent(ACTION_AI_RESULT);
                     aiIntent.putExtra("vision", result);
                     aiIntent.putExtra("activity", distractionManager.getLastAiActivity());
-                    aiIntent.putExtra("is_focused", distractionManager.isLastAiFocused());
+                    aiIntent.putExtra("is_focused", distractionManager.isLastAiFocused()); // 这个专供 UI 显示绿色/红色状态字
                     aiIntent.putExtra("goal", focusGoal);
                     aiIntent.putExtra("current_app", currentForegroundApp);
                     LocalBroadcastManager.getInstance(FocusService.this).sendBroadcast(aiIntent);
 
-                    if (shouldWarn) handleDistraction();
+                    // 绝不在这里写 handleDistraction()！惩罚的生杀大权已经全部移交给了 timerTick 的漏桶！
                 });
             }
 
@@ -869,17 +915,21 @@ public class FocusService extends Service {
     private void analyzeScreenContent(String screenText, String packageName) {
         String appName = getAppNameFromPackage(packageName);
         boolean isInWhitelist = whitelist.contains(packageName);
+
         if (isInWhitelist) {
             String result = "{\"conclusion\":\"YES\",\"reason\":\"应用在白名单中\",\"behavior\":\"使用白名单应用\",\"confidence\":100}";
             mainHandler.post(() -> {
-                distractionManager.analyzeAndCheck(result, packageName, whitelist);
-                isCurrentlyDistracted = false; // 白名单，没分心
+                // 🚨 修改：直接用经理的鉴定结果（虽然白名单肯定返回 false 也就是不分心），保持代码整齐划一
+                isCurrentlyDistracted = distractionManager.analyzeAndCheck(result, packageName, whitelist);
+
                 Intent aiIntent = new Intent(ACTION_AI_RESULT);
                 aiIntent.putExtra("vision", result);
                 aiIntent.putExtra("activity", "使用白名单应用: " + appName);
                 aiIntent.putExtra("is_focused", true);
                 aiIntent.putExtra("goal", focusGoal);
-                sendBroadcast(aiIntent);
+
+                // 💡 顺手优化：你的原代码写的是 sendBroadcast，但接收器是用 Local 注册的。改成 LocalBroadcastManager 更安全、更快！
+                LocalBroadcastManager.getInstance(FocusService.this).sendBroadcast(aiIntent);
             });
             return;
         }
@@ -923,19 +973,19 @@ public class FocusService extends Service {
                 "{\"conclusion\":\"NO\",\"reason\":\"不符合目标：用户任务是XX，但当前在XX\",\"behavior\":\"当前行为\",\"confidence\":75}";
 
         GlmApiService.analyzeText(prompt, new GlmApiService.AiCallback() {
-            @Override
             public void onSuccess(String result) {
                 if (currentState != FocusState.FOCUSING) return;
 
                 mainHandler.post(() -> {
                     if (currentState != FocusState.FOCUSING) return;
 
-                    // shouldWarn 只是用来判断要不要弹警告窗的
-                    boolean shouldWarn = distractionManager.analyzeAndCheck(result, packageName, whitelist);
+                    // 🚨 核心修改 1：让新版双源考官进行鉴定，直接把结果赋值给秒表状态！
+                    // 注意：现在它返回的是"是否分心"，不再是"是否弹窗"了。
+                    isCurrentlyDistracted = distractionManager.analyzeAndCheck(result, packageName, whitelist);
 
-                    // 🚨 核心修复：秒表状态必须绝对服从 AI 的判断！
-                    isCurrentlyDistracted = !distractionManager.isLastAiFocused();
+                    // 🚨 核心修改 2：把那句 "isCurrentlyDistracted = !distractionManager.isLastAiFocused();" 删掉了，因为上面那行已经搞定了。
 
+                    // 发送广播，让 UI 界面更新文字和颜色
                     Intent aiIntent = new Intent(ACTION_AI_RESULT);
                     aiIntent.putExtra("vision", result);
                     aiIntent.putExtra("activity", distractionManager.getLastAiActivity());
@@ -944,7 +994,8 @@ public class FocusService extends Service {
                     aiIntent.putExtra("current_app", packageName);
                     LocalBroadcastManager.getInstance(FocusService.this).sendBroadcast(aiIntent);
 
-                    if (shouldWarn) handleDistraction();
+                    // 🚨 核心修改 3：彻底删除了 if (shouldWarn) handleDistraction(); ！！！
+                    // 绝不在这里越权弹窗！能不能弹窗，让 timerTick 里的漏桶说了算！
                 });
             }
 

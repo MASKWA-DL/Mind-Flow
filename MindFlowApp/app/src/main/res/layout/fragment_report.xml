@@ -186,8 +186,8 @@
                         android:layout_marginTop="12dp"
                         android:visibility="visible" />
 
-                    <com.github.mikephil.charting.charts.BarChart
-                        android:id="@+id/barChart"
+                    <com.github.mikephil.charting.charts.LineChart
+                        android:id="@+id/lineChart"
                         android:layout_width="match_parent"
                         android:layout_height="250dp"
                         android:layout_marginTop="12dp"
