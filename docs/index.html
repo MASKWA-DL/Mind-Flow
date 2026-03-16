@@ -334,48 +334,6 @@
         return;
       }
 
-      statusEl.textContent = "正在校验用户...";
-      const verifyResp = await fetch(
-        SUPABASE_URL + "/rest/v1/user_profiles?email=eq." + encodeURIComponent(email) + "&select=id,email&limit=1",
-        {
-          method: "GET",
-          headers: {
-            "apikey": SUPABASE_ANON_KEY,
-            "Content-Type": "application/json"
-          }
-        }
-      );
-
-      if (!verifyResp.ok) {
-        statusEl.className = "err";
-        statusEl.textContent = "暂时无法验证账户，继续尝试发送重置邮件...";
-      }
-
-      if (verifyResp.ok) {
-        const verifyText = await verifyResp.text();
-        let verifyRows = null;
-        try {
-          verifyRows = JSON.parse(verifyText || "[]");
-        } catch (_) {
-          verifyRows = null;
-        }
-
-        if (Array.isArray(verifyRows)) {
-          if (verifyRows.length === 0) {
-            statusEl.className = "err";
-            statusEl.textContent = "资料库未命中该邮箱，继续尝试发送重置邮件...";
-          } else {
-            const first = verifyRows[0] || {};
-            const verifyId = String(first.id || "").trim();
-            const verifyEmail = String(first.email || "").trim();
-            if (!verifyId || (verifyEmail && verifyEmail.toLowerCase() !== email.toLowerCase())) {
-              statusEl.className = "err";
-              statusEl.textContent = "资料校验异常，继续尝试发送重置邮件...";
-            }
-          }
-        }
-      }
-
       statusEl.textContent = "正在发送重置邮件...";
       const resp = await fetch(SUPABASE_URL + "/auth/v1/recover", {
         method: "POST",
