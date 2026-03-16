@@ -363,17 +363,16 @@
         if (Array.isArray(verifyRows)) {
           if (verifyRows.length === 0) {
             statusEl.className = "err";
-            statusEl.textContent = "该账户不存在，请先注册。";
-            return;
-          }
-
-          const first = verifyRows[0] || {};
-          const verifyId = String(first.id || "").trim();
-          const verifyEmail = String(first.email || "").trim();
-          if (!verifyId || (verifyEmail && verifyEmail.toLowerCase() !== email.toLowerCase())) {
-            statusEl.className = "err";
-            statusEl.textContent = "该账户不存在，请先注册。";
-            return;
+            statusEl.textContent = "资料库未命中该邮箱，继续尝试发送重置邮件...";
+          } else {
+            const first = verifyRows[0] || {};
+            const verifyId = String(first.id || "").trim();
+            const verifyEmail = String(first.email || "").trim();
+            if (!verifyId || (verifyEmail && verifyEmail.toLowerCase() !== email.toLowerCase())) {
+              statusEl.className = "err";
+              statusEl.textContent = "该账户不存在，请先注册。";
+              return;
+            }
           }
         }
       }

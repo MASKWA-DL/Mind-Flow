@@ -248,18 +248,19 @@ public class SupabaseClient {
             if (response.isSuccessful()) {
                 JSONArray arr = new JSONArray(responseBody);
                 if (arr.length() <= 0) {
-                    return UserExistence.NOT_EXISTS;
+                    // user_profiles 可能缺历史数据，不能据此断言 auth.users 不存在。
+                    return UserExistence.UNKNOWN;
                 }
 
                 JSONObject first = arr.optJSONObject(0);
                 if (first == null) {
-                    return UserExistence.NOT_EXISTS;
+                    return UserExistence.UNKNOWN;
                 }
 
                 String id = first.optString("id", "").trim();
                 String returnedEmail = first.optString("email", "").trim();
                 if (id.isEmpty()) {
-                    return UserExistence.NOT_EXISTS;
+                    return UserExistence.UNKNOWN;
                 }
                 if (!returnedEmail.isEmpty() && !returnedEmail.equalsIgnoreCase(email)) {
                     return UserExistence.NOT_EXISTS;
