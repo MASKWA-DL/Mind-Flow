@@ -132,12 +132,6 @@ public class AuthManager {
     public void resetPassword(String email, AuthCallback callback) {
         executor.execute(() -> {
             try {
-                SupabaseClient.UserExistence existence = supabaseClient.checkUserExistsByEmail(email);
-                if (existence == SupabaseClient.UserExistence.NOT_EXISTS) {
-                    notifyFailure(callback, "该账户不存在，请先注册");
-                    return;
-                }
-
                 boolean success = supabaseClient.resetPassword(email);
                 if (success) {
                     notifySuccess(callback, null, email, null);
