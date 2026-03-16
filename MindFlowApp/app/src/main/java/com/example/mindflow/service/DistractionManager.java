@@ -7,6 +7,8 @@ import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
@@ -47,14 +49,14 @@ public class DistractionManager {
     // 连续工作可减少警告计数的时间（秒）
     private static final int WORK_RECOVERY_SECONDS = 30;
     // 分心记录防抖时间（毫秒）- 两次分心记录之间至少间隔此时间
-    private static final long DISTRACTION_DEBOUNCE_MS = 15000; // 15秒，与AI监控频率同步
-    private static final int LOW_CONFIDENCE_THRESHOLD = 60;
-    private static final int MEDIUM_CONFIDENCE_THRESHOLD = 75;
-    private static final int HIGH_CONFIDENCE_THRESHOLD = 85;
-    private static final int DISTRACTION_TRIGGER_EVIDENCE = 70;
-    private static final int APP_SIGNAL_EVIDENCE = 20;
-    private static final int STRONG_FOCUS_RECOVERY = 35;
-    private static final int UNSURE_RECOVERY = 15;
+    private static final long DISTRACTION_DEBOUNCE_MS = 8000; // 提升灵敏度：缩短防抖
+    private static final int LOW_CONFIDENCE_THRESHOLD = 50;
+    private static final int MEDIUM_CONFIDENCE_THRESHOLD = 65;
+    private static final int HIGH_CONFIDENCE_THRESHOLD = 80;
+    private static final int DISTRACTION_TRIGGER_EVIDENCE = 55;
+    private static final int APP_SIGNAL_EVIDENCE = 30;
+    private static final int STRONG_FOCUS_RECOVERY = 25;
+    private static final int UNSURE_RECOVERY = 10;
 
     private enum DecisionStatus {
         FOCUSED,
@@ -83,8 +85,8 @@ public class DistractionManager {
     private String lastAiActivity = ""; // AI 识别的用户行为
     private boolean lastAiFocused = true; // AI 判断是否专注
 
-    // 提醒冷却时间（毫秒）- 两次提醒之间至少间隔15秒，与AI监控频率同步
-    private static final long WARNING_COOLDOWN_MS = 15000; // 15秒
+    // 提醒冷却时间（毫秒）
+    private static final long WARNING_COOLDOWN_MS = 5000;
     private long lastWarningTime = 0;
 
     // 分心历史记录（从SharedPreferences加载）
@@ -288,10 +290,9 @@ public class DistractionManager {
             return false;
         }
 
-        // 提醒冷却期内不进行监控（两次提醒间隔至少15秒，与AI监控频率同步）
+        // 提醒冷却期内仍继续监控，仅抑制重复提醒，避免“判定到分心却不计数”。
         if (now - lastWarningTime < WARNING_COOLDOWN_MS && lastWarningTime > 0) {
-            Log.d(TAG, "提醒冷却期内（" + (WARNING_COOLDOWN_MS - (now - lastWarningTime)) / 1000 + "秒后恢复），跳过监控");
-            return false;
+            Log.d(TAG, "提醒冷却期内，继续监控并计数");
         }
 
         // 缓冲期内不进行监控（开始专注后/锁机结束后的6秒缓冲）
@@ -378,7 +379,7 @@ public class DistractionManager {
             return false;
         }
 
-        if (now - lastDistractionTime <= DISTRACTION_DEBOUNCE_MS) {
+        if (now - lastDistractionTime < DISTRACTION_DEBOUNCE_MS) {
             Log.d(TAG, "分心事件防抖中，暂不重复记分");
             return false;
         }
@@ -564,12 +565,15 @@ public class DistractionManager {
                 if (now - lastWarningTime >= WARNING_COOLDOWN_MS) {
                     lastWarningTime = now;
                     recordIntervention("warning");
+                    triggerHapticAlert(false);
                     showWarningNotification();
                 }
                 break;
             case LOCK:
                 // 分心3次：锁机
                 recordIntervention("lock");
+                triggerHapticAlert(true);
+                showWarningNotification();
                 showLockNotification();
                 break;
             default:
@@ -604,6 +608,23 @@ public class DistractionManager {
 
     private static final String CHANNEL_WARNING_ID = "MindFlow_Warning_Channel";
     private static final int NOTIFICATION_WARNING_ID = 2001;
+
+    private void triggerHapticAlert(boolean strong) {
+        try {
+            Vibrator vibrator = (Vibrator) context.getSystemService(Context.VIBRATOR_SERVICE);
+            if (vibrator == null || !vibrator.hasVibrator()) {
+                return;
+            }
+            long[] pattern = strong ? new long[]{0, 260, 120, 260} : new long[]{0, 160, 90, 160};
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator.vibrate(VibrationEffect.createWaveform(pattern, -1));
+            } else {
+                vibrator.vibrate(pattern, -1);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "触发震动提醒失败: " + e.getMessage());
+        }
+    }
 
     /**
      * 显示分心警告通知（Heads-up弹出）
