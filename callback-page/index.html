@@ -370,8 +370,7 @@
             const verifyEmail = String(first.email || "").trim();
             if (!verifyId || (verifyEmail && verifyEmail.toLowerCase() !== email.toLowerCase())) {
               statusEl.className = "err";
-              statusEl.textContent = "该账户不存在，请先注册。";
-              return;
+              statusEl.textContent = "资料校验异常，继续尝试发送重置邮件...";
             }
           }
         }

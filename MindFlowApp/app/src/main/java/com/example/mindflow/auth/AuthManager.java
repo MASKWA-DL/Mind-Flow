@@ -134,8 +134,7 @@ public class AuthManager {
             try {
                 SupabaseClient.UserExistence existence = supabaseClient.checkUserExistsByEmail(email);
                 if (existence == SupabaseClient.UserExistence.NOT_EXISTS) {
-                    notifyFailure(callback, "该账户不存在，请先注册");
-                    return;
+                    Log.w(TAG, "user_profiles 未命中邮箱，继续尝试发送重置邮件: " + email);
                 }
 
                 boolean success = supabaseClient.resetPassword(email);
