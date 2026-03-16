@@ -136,7 +136,7 @@ public class AuthManager {
                 if (success) {
                     notifySuccess(callback, null, email, null);
                 } else {
-                    notifyFailure(callback, "发送失败，请检查邮箱地址");
+                    notifyFailure(callback, "重置请求失败，请稍后重试");
                 }
             } catch (Exception e) {
                 Log.e(TAG, "Reset password error", e);

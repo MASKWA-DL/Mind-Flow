@@ -416,7 +416,7 @@ public class LoginActivity extends AppCompatActivity {
             public void onSuccess(String userId, String email, String username) {
                 runOnUiThread(() -> {
                     setLoading(false);
-                    Toast.makeText(LoginActivity.this, "重置密码邮件已发送，请查收", Toast.LENGTH_LONG).show();
+                    Toast.makeText(LoginActivity.this, "重置邮件请求已提交(v0317)", Toast.LENGTH_LONG).show();
                 });
             }
             
@@ -424,7 +424,7 @@ public class LoginActivity extends AppCompatActivity {
             public void onFailure(String error) {
                 runOnUiThread(() -> {
                     setLoading(false);
-                    Toast.makeText(LoginActivity.this, "发送失败: " + error, Toast.LENGTH_LONG).show();
+                    Toast.makeText(LoginActivity.this, "重置失败(v0317): " + error, Toast.LENGTH_LONG).show();
                 });
             }
         });
