@@ -133,7 +133,7 @@ public class AuthManager {
         executor.execute(() -> {
             try {
                 SupabaseClient.UserExistence existence = supabaseClient.checkUserExistsByEmail(email);
-                if (existence != SupabaseClient.UserExistence.EXISTS) {
+                if (existence == SupabaseClient.UserExistence.NOT_EXISTS) {
                     notifyFailure(callback, "该账户不存在，请先注册");
                     return;
                 }
