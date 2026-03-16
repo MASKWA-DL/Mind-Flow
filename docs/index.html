@@ -143,9 +143,14 @@
     const error = param("error");
     const errorCode = param("error_code");
     const errorDesc = decodeURIComponent(param("error_description") || "");
+    const msg = decodeURIComponent(param("msg") || "");
     const accessToken = param("access_token");
     const type = (param("type") || "").toLowerCase();
     const sbParam = param("sb");
+    const emailParam = param("email") || queryParams.get("email") || "";
+
+    let resendCooldownUntil = 0;
+    let resendCooldownTimer = null;
 
     payloadEl.textContent = [query, hash].filter(Boolean).join("\n# ") || "(空)";
 
@@ -173,6 +178,66 @@
       return true;
     }
 
+    function parseJsonSafe(text) {
+      try {
+        return JSON.parse(text || "{}");
+      } catch (_) {
+        return {};
+      }
+    }
+
+    function decodeJwtPayload(token) {
+      try {
+        if (!token || token.split(".").length < 2) return {};
+        const payload = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+        const pad = payload.length % 4 === 0 ? "" : "=".repeat(4 - (payload.length % 4));
+        return JSON.parse(atob(payload + pad));
+      } catch (_) {
+        return {};
+      }
+    }
+
+    function parseRetrySeconds(resp, responseText) {
+      const retryAfter = resp && resp.headers ? resp.headers.get("retry-after") : null;
+      if (retryAfter && /^\d+$/.test(retryAfter.trim())) {
+        return Number(retryAfter.trim());
+      }
+
+      const text = (responseText || "") + " " + msg;
+      const en = text.match(/after\s+(\d+)\s+seconds?/i);
+      if (en) return Number(en[1]);
+      const zh = text.match(/(\d+)\s*秒/);
+      if (zh) return Number(zh[1]);
+      return 35;
+    }
+
+    function setResendCooldown(seconds) {
+      const sec = Math.max(1, Number(seconds) || 35);
+      resendCooldownUntil = Date.now() + sec * 1000;
+
+      if (resendCooldownTimer) {
+        clearInterval(resendCooldownTimer);
+      }
+
+      function tickCooldown() {
+        const left = Math.ceil((resendCooldownUntil - Date.now()) / 1000);
+        if (left <= 0) {
+          resendBtn.disabled = false;
+          resendBtn.textContent = "重新发送重置邮件";
+          if (resendCooldownTimer) {
+            clearInterval(resendCooldownTimer);
+            resendCooldownTimer = null;
+          }
+          return;
+        }
+        resendBtn.disabled = true;
+        resendBtn.textContent = "请等待 " + left + " 秒";
+      }
+
+      tickCooldown();
+      resendCooldownTimer = setInterval(tickCooldown, 1000);
+    }
+
     async function updatePasswordAndSync(newPassword) {
       if (!ensureConfig()) return;
       if (!accessToken) {
@@ -194,8 +259,18 @@
 
       const resetText = await resetResp.text();
       if (!resetResp.ok) {
+        const resetErr = parseJsonSafe(resetText);
+        const resetCode = String(resetErr.error_code || resetErr.code || "").toLowerCase();
+        const resetMsg = String(resetErr.msg || resetErr.error_description || resetText || "");
+        if (resetResp.status === 401 || resetResp.status === 403 || resetCode.includes("expired") || resetCode.includes("invalid") || resetCode.includes("access_denied")) {
+          statusEl.className = "err";
+          statusEl.textContent = "重设凭证已失效，请重新发送重置邮件。";
+          resetSection.classList.add("hidden");
+          expiredSection.classList.remove("hidden");
+          return;
+        }
         statusEl.className = "err";
-        statusEl.textContent = "密码更新失败：" + resetText;
+        statusEl.textContent = "密码更新失败：" + resetMsg;
         return;
       }
 
@@ -271,6 +346,13 @@
 
       const text = await resp.text();
       if (!resp.ok) {
+        if (resp.status === 429) {
+          const retrySec = parseRetrySeconds(resp, text);
+          setResendCooldown(retrySec);
+          statusEl.className = "err";
+          statusEl.textContent = "发送过于频繁，请在 " + retrySec + " 秒后重试。";
+          return;
+        }
         statusEl.className = "err";
         statusEl.textContent = "发送失败：" + text;
         return;
@@ -282,9 +364,14 @@
 
     if (error || errorCode) {
       statusEl.className = "err";
-      statusEl.textContent = "回调失败：" + (errorCode || error || "unknown") + (errorDesc ? " (" + errorDesc + ")" : "");
-      if ((errorCode || "").toLowerCase() === "otp_expired") {
+      const displayCode = (errorCode || error || "unknown").toLowerCase();
+      const suffix = errorDesc || msg;
+      statusEl.textContent = "回调失败：" + displayCode + (suffix ? " (" + suffix + ")" : "");
+      if (displayCode === "otp_expired" || displayCode === "over_email_send_rate_limit") {
         expiredSection.classList.remove("hidden");
+        if (displayCode === "over_email_send_rate_limit") {
+          setResendCooldown(parseRetrySeconds(null, ""));
+        }
       }
     } else if (type === "recovery" && accessToken) {
       statusEl.className = "ok";
@@ -317,13 +404,34 @@
     });
 
     resendBtn.addEventListener("click", async () => {
+      if (Date.now() < resendCooldownUntil) {
+        return;
+      }
       resendBtn.disabled = true;
       try {
-        await resendRecoveryEmail((emailInputEl.value || "").trim());
+        const email = (emailInputEl.value || "").trim();
+        if (email) {
+          try {
+            localStorage.setItem("mf_recovery_email", email);
+          } catch (_) {}
+        }
+        await resendRecoveryEmail(email);
       } finally {
-        resendBtn.disabled = false;
+        if (Date.now() >= resendCooldownUntil) {
+          resendBtn.disabled = false;
+        }
       }
     });
+
+    (function initEmailInput() {
+      let saved = "";
+      try {
+        saved = localStorage.getItem("mf_recovery_email") || "";
+      } catch (_) {}
+      const jwtPayload = decodeJwtPayload(accessToken);
+      const jwtEmail = typeof jwtPayload.email === "string" ? jwtPayload.email : "";
+      emailInputEl.value = emailParam || jwtEmail || saved;
+    })();
 
     copyBtn.addEventListener("click", async () => {
       try {

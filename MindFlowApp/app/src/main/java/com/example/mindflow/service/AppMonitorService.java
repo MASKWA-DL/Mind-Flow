@@ -96,6 +96,31 @@ public class AppMonitorService extends AccessibilityService {
     
     // === 看门狗Handler ===
     private Handler overlayHandler = new Handler(Looper.getMainLooper());
+    private final Runnable temporaryAllowExpiryCheck = new Runnable() {
+        @Override
+        public void run() {
+            if (temporaryAllowedApp == null) {
+                return;
+            }
+            if (allowSeenTarget) {
+                return;
+            }
+            long now = System.currentTimeMillis();
+            if (now < temporaryAllowedExpireTime) {
+                long delay = Math.max(50, temporaryAllowedExpireTime - now + 50);
+                overlayHandler.postDelayed(this, delay);
+                return;
+            }
+
+            String pkg = basePkg(currentPackageName);
+            clearTemporaryAllowedApp();
+
+            if (isLockScreenActive && !isDeviceLocked() && !pkg.contains("mindflow") && !isInWhitelistOrAllowed(pkg)) {
+                Log.w(TAG, "🚨 临时放行到期且仍不在白名单，强制拉回锁机: " + pkg);
+                notifyShowLockOverlay();
+            }
+        }
+    };
     
     public static AppMonitorService getInstance() {
         return instance;
@@ -929,6 +954,8 @@ public class AppMonitorService extends AccessibilityService {
         this.temporaryAllowedApp = basePkg(packageName);
         this.temporaryAllowedExpireTime = System.currentTimeMillis() + ALLOW_WINDOW_MS;
         this.allowSeenTarget = false;  // 重置：还没真正进入目标App
+        overlayHandler.removeCallbacks(temporaryAllowExpiryCheck);
+        overlayHandler.postDelayed(temporaryAllowExpiryCheck, ALLOW_WINDOW_MS + 80);
         Log.i(TAG, "🔓 临时允许应用: " + temporaryAllowedApp + " (" + ALLOW_WINDOW_MS + "ms窗口)");
     }
     
@@ -939,6 +966,7 @@ public class AppMonitorService extends AccessibilityService {
         this.temporaryAllowedApp = null;
         this.temporaryAllowedExpireTime = 0;
         this.allowSeenTarget = false;
+        overlayHandler.removeCallbacks(temporaryAllowExpiryCheck);
         Log.i(TAG, "🔒 清除临时允许应用");
     }
     
