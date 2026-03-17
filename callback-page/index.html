@@ -112,7 +112,6 @@
     </section>
 
     <div class="row">
-      <button id="openAppBtn" class="ghost hidden" type="button">打开 MindFlow App</button>
       <button id="copyBtn" class="ghost" type="button">复制回调参数</button>
     </div>
     <code id="payload"></code>
@@ -122,7 +121,6 @@
     const statusEl = document.getElementById("status");
     const payloadEl = document.getElementById("payload");
     const copyBtn = document.getElementById("copyBtn");
-    const openAppBtn = document.getElementById("openAppBtn");
 
     const resetSection = document.getElementById("resetSection");
     const expiredSection = document.getElementById("expiredSection");
@@ -279,10 +277,6 @@
       }
 
       const appLink = buildRecoveryAppLink();
-      openAppBtn.classList.remove("hidden");
-      openAppBtn.onclick = () => {
-        window.location.href = appLink;
-      };
 
       statusEl.className = "ok";
       statusEl.textContent = "检测到重置令牌，正在尝试唤起 MindFlow App...";

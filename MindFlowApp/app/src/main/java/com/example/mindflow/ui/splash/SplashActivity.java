@@ -10,9 +10,10 @@ import android.view.View;
 
 import androidx.appcompat.app.AppCompatActivity;
 
+import com.example.mindflow.MainActivity;
 import com.example.mindflow.R;
+import com.example.mindflow.auth.AuthManager;
 import com.example.mindflow.ui.auth.LoginActivity;
-import com.example.mindflow.ui.setup.PermissionSetupActivity;
 
 public class SplashActivity extends AppCompatActivity {
 
@@ -62,21 +63,13 @@ public class SplashActivity extends AppCompatActivity {
 
     private void routeNext() {
         Intent next;
-        if (isSetupComplete()) {
-            next = new Intent(this, LoginActivity.class);
+        AuthManager authManager = AuthManager.getInstance(this);
+        if (authManager.isLoggedIn() || authManager.isOfflineMode()) {
+            next = new Intent(this, MainActivity.class);
         } else {
-            next = new Intent(this, PermissionSetupActivity.class);
+            next = new Intent(this, LoginActivity.class);
         }
         startActivity(next);
         finish();
-    }
-
-    private boolean isSetupComplete() {
-        SharedPreferences prefs = getSharedPreferences("MindFlowPrefs", MODE_PRIVATE);
-        boolean flagComplete = prefs.getBoolean("setup_complete", false);
-        if (!flagComplete) {
-            return false;
-        }
-        return Settings.canDrawOverlays(this);
     }
 }
