@@ -132,6 +132,16 @@ public class AuthManager {
     public void resetPassword(String email, AuthCallback callback) {
         executor.execute(() -> {
             try {
+                SupabaseClient.UserExistence existence = supabaseClient.checkUserExistsByEmail(email);
+                if (existence == SupabaseClient.UserExistence.NOT_EXISTS) {
+                    notifyFailure(callback, "该用户不存在");
+                    return;
+                }
+                if (existence == SupabaseClient.UserExistence.UNKNOWN) {
+                    notifyFailure(callback, "暂时无法验证该用户，请稍后重试");
+                    return;
+                }
+
                 boolean success = supabaseClient.resetPassword(email);
                 if (success) {
                     notifySuccess(callback, null, email, null);
@@ -140,7 +150,12 @@ public class AuthManager {
                 }
             } catch (Exception e) {
                 Log.e(TAG, "Reset password error", e);
-                notifyFailure(callback, "网络错误: " + e.getMessage());
+                String msg = e.getMessage() == null ? "" : e.getMessage();
+                if (msg.toLowerCase().contains("unable to resolve host")) {
+                    notifyFailure(callback, "网络不可用或服务地址不可达，请检查网络后重试");
+                } else {
+                    notifyFailure(callback, "网络错误: " + msg);
+                }
             }
         });
     }

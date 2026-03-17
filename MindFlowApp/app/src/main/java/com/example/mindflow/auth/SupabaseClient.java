@@ -233,6 +233,11 @@ public class SupabaseClient {
     public UserExistence checkUserExistsByEmail(String email) throws Exception {
         validateConfig();
 
+        UserExistence rpcResult = checkUserExistsByEmailRpc(email);
+        if (rpcResult != UserExistence.UNKNOWN) {
+            return rpcResult;
+        }
+
         String encodedEmail = URLEncoder.encode(email, StandardCharsets.UTF_8.name());
         String url = supabaseUrl + "/rest/v1/user_profiles?email=eq." + encodedEmail + "&select=id,email&limit=1";
 
@@ -274,6 +279,50 @@ public class SupabaseClient {
             // 无法查询时返回 UNKNOWN，由上层决定是否阻断。
             return UserExistence.UNKNOWN;
         }
+    }
+
+    private UserExistence checkUserExistsByEmailRpc(String email) {
+        try {
+            JSONObject body = new JSONObject();
+            body.put("p_email", email);
+
+            Request request = new Request.Builder()
+                    .url(supabaseUrl + "/rest/v1/rpc/email_exists")
+                    .addHeader("apikey", supabaseKey)
+                    .addHeader("Content-Type", "application/json")
+                    .post(RequestBody.create(body.toString(), JSON))
+                    .build();
+
+            try (Response response = client.newCall(request).execute()) {
+                String responseBody = response.body() != null ? response.body().string() : "";
+                Log.d(TAG, "RPC email_exists response: " + response.code() + " - " + responseBody);
+                if (!response.isSuccessful()) {
+                    return UserExistence.UNKNOWN;
+                }
+
+                String normalized = responseBody == null ? "" : responseBody.trim();
+                if ("true".equalsIgnoreCase(normalized)) {
+                    return UserExistence.EXISTS;
+                }
+                if ("false".equalsIgnoreCase(normalized)) {
+                    return UserExistence.NOT_EXISTS;
+                }
+
+                if (normalized.startsWith("{")) {
+                    JSONObject json = new JSONObject(normalized);
+                    if (json.has("email_exists")) {
+                        return json.optBoolean("email_exists") ? UserExistence.EXISTS : UserExistence.NOT_EXISTS;
+                    }
+                    if (json.has("exists")) {
+                        return json.optBoolean("exists") ? UserExistence.EXISTS : UserExistence.NOT_EXISTS;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "RPC email_exists unavailable, fallback to user_profiles query: " + e.getMessage());
+        }
+
+        return UserExistence.UNKNOWN;
     }
 
     /**
