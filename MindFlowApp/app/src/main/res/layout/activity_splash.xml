@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/bg_splash_gradient">
+
+    <View
+        android:id="@+id/orbLeft"
+        android:layout_width="180dp"
+        android:layout_height="180dp"
+        android:layout_gravity="top|start"
+        android:layout_marginStart="-40dp"
+        android:layout_marginTop="80dp"
+        android:background="@drawable/bg_splash_orb_left" />
+
+    <View
+        android:id="@+id/orbRight"
+        android:layout_width="220dp"
+        android:layout_height="220dp"
+        android:layout_gravity="bottom|end"
+        android:layout_marginEnd="-70dp"
+        android:layout_marginBottom="120dp"
+        android:background="@drawable/bg_splash_orb_right" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:padding="24dp">
+
+        <ImageView
+            android:id="@+id/ivSplashLogo"
+            android:layout_width="110dp"
+            android:layout_height="110dp"
+            android:src="@mipmap/ic_launcher_round"
+            android:contentDescription="MindFlow Logo" />
+
+        <TextView
+            android:id="@+id/tvSplashTitle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="MindFlow"
+            android:textColor="@color/text_primary"
+            android:textSize="34sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tvSplashSlogan"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="专注力管理，从这里开始"
+            android:textColor="@color/text_secondary"
+            android:textSize="16sp" />
+    </LinearLayout>
+
+</FrameLayout>

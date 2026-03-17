@@ -89,6 +89,7 @@ public class AppMonitorService extends AccessibilityService {
     private long temporaryAllowedExpireTime = 0;
     private boolean allowSeenTarget = false;  // 是否已经真正进入过目标白名单App
     private static final long ALLOW_WINDOW_MS = 3000; // 3秒启动窗口（覆盖慢设备启动过渡）
+    private static final long TEMP_ALLOW_WATCHDOG_MS = 300; // 临时放行看门狗轮询间隔
     
     // === 节流：防止频繁触发show() ===
     private long lastNotifyTime = 0;
@@ -96,6 +97,53 @@ public class AppMonitorService extends AccessibilityService {
     
     // === 看门狗Handler ===
     private Handler overlayHandler = new Handler(Looper.getMainLooper());
+    private final Runnable temporaryAllowExpiryCheck = new Runnable() {
+        @Override
+        public void run() {
+            if (temporaryAllowedApp == null) {
+                return;
+            }
+
+            String observedPkg = resolveCurrentForegroundPackageSnapshot();
+            String pkg = basePkg(observedPkg.isEmpty() ? currentPackageName : observedPkg);
+            if (!pkg.isEmpty() && !pkg.equals(currentPackageName)) {
+                currentPackageName = pkg;
+            }
+
+            long now = System.currentTimeMillis();
+
+            if (pkg.equals(temporaryAllowedApp)) {
+                allowSeenTarget = true;
+            }
+
+            if (!allowSeenTarget) {
+                if (now >= temporaryAllowedExpireTime) {
+                    clearTemporaryAllowedApp();
+
+                    if (isLockScreenActive && !isDeviceLocked() && !pkg.contains("mindflow") && !isInWhitelistOrAllowed(pkg)) {
+                        Log.w(TAG, "🚨 临时放行到期且仍不在白名单，强制拉回锁机: " + pkg);
+                        notifyShowLockOverlay();
+                    }
+                    return;
+                }
+
+                overlayHandler.postDelayed(this, TEMP_ALLOW_WATCHDOG_MS);
+                return;
+            }
+
+            if (!pkg.equals(temporaryAllowedApp)) {
+                Log.w(TAG, "🚨 放行后离开白名单App，强制拉回: " + temporaryAllowedApp + " -> " + pkg);
+                clearTemporaryAllowedApp();
+
+                if (isLockScreenActive && !isDeviceLocked() && !pkg.contains("mindflow") && !isInWhitelistOrAllowed(pkg)) {
+                    notifyShowLockOverlay();
+                }
+                return;
+            }
+
+            overlayHandler.postDelayed(this, TEMP_ALLOW_WATCHDOG_MS);
+        }
+    };
     
     public static AppMonitorService getInstance() {
         return instance;
@@ -517,6 +565,7 @@ public class AppMonitorService extends AccessibilityService {
     public void onDestroy() {
         super.onDestroy();
         instance = null;
+        overlayHandler.removeCallbacks(temporaryAllowExpiryCheck);
         if (isBound) {
             unbindService(serviceConnection);
             isBound = false;
@@ -691,6 +740,20 @@ public class AppMonitorService extends AccessibilityService {
     
     public String getCurrentPackageName() {
         return currentPackageName;
+    }
+
+    private String resolveCurrentForegroundPackageSnapshot() {
+        try {
+            AccessibilityNodeInfo root = getRootInActiveWindow();
+            if (root == null) {
+                return "";
+            }
+            CharSequence pkg = root.getPackageName();
+            root.recycle();
+            return pkg == null ? "" : pkg.toString();
+        } catch (Exception e) {
+            return "";
+        }
     }
     
     // =====================================================
@@ -929,6 +992,8 @@ public class AppMonitorService extends AccessibilityService {
         this.temporaryAllowedApp = basePkg(packageName);
         this.temporaryAllowedExpireTime = System.currentTimeMillis() + ALLOW_WINDOW_MS;
         this.allowSeenTarget = false;  // 重置：还没真正进入目标App
+        overlayHandler.removeCallbacks(temporaryAllowExpiryCheck);
+        overlayHandler.postDelayed(temporaryAllowExpiryCheck, TEMP_ALLOW_WATCHDOG_MS);
         Log.i(TAG, "🔓 临时允许应用: " + temporaryAllowedApp + " (" + ALLOW_WINDOW_MS + "ms窗口)");
     }
     
@@ -939,6 +1004,7 @@ public class AppMonitorService extends AccessibilityService {
         this.temporaryAllowedApp = null;
         this.temporaryAllowedExpireTime = 0;
         this.allowSeenTarget = false;
+        overlayHandler.removeCallbacks(temporaryAllowExpiryCheck);
         Log.i(TAG, "🔒 清除临时允许应用");
     }
     

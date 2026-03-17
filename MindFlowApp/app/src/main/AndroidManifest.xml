@@ -150,13 +150,35 @@
             android:theme="@style/Theme.MindFlow" />
 
         <activity
-            android:name=".MainActivity"
+            android:name=".ui.splash.SplashActivity"
             android:exported="true"
             android:theme="@style/Theme.MindFlow">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+        </activity>
+
+        <!-- 登录界面 -->
+        <activity
+            android:name=".ui.auth.LoginActivity"
+            android:exported="true"
+            android:theme="@style/Theme.MindFlow">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="mindflow"
+                    android:host="auth-callback"
+                    android:pathPrefix="/reset-password" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@style/Theme.MindFlow">
         </activity>
 
         <activity

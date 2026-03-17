@@ -12,6 +12,9 @@ public final class FocusModePreferences {
     private static final String KEY_FOCUS_ACTIVE = "focus_mode_active";
     private static final String KEY_NOTIFICATION_ALLOWLIST = "notification_allowlist";
     private static final String KEY_NOTIFICATION_BLOCKED_COUNT = "current_blocked_notifications";
+    private static final String KEY_AI_AUDIT_SENSITIVITY = "ai_audit_sensitivity";
+    private static final String KEY_AI_DEBUG_MODE = "ai_debug_mode";
+    private static final String KEY_LOCK_DURATION_SECONDS = "lock_duration_seconds";
 
     private FocusModePreferences() {
     }
@@ -57,6 +60,41 @@ public final class FocusModePreferences {
         SharedPreferences prefs = getPrefs(context);
         int next = prefs.getInt(KEY_NOTIFICATION_BLOCKED_COUNT, 0) + 1;
         prefs.edit().putInt(KEY_NOTIFICATION_BLOCKED_COUNT, next).apply();
+    }
+
+    /**
+     * AI 分心审计灵敏度：0=宽松，100=严格，默认 50。
+     */
+    public static int getAiAuditSensitivity(Context context) {
+        return getPrefs(context).getInt(KEY_AI_AUDIT_SENSITIVITY, 50);
+    }
+
+    public static void setAiAuditSensitivity(Context context, int sensitivity) {
+        int clamped = Math.max(0, Math.min(100, sensitivity));
+        getPrefs(context).edit().putInt(KEY_AI_AUDIT_SENSITIVITY, clamped).apply();
+    }
+
+    /**
+     * AI 调试模式：用于用户反馈“判对/判错”与调试训练入口，默认关闭。
+     */
+    public static boolean isAiDebugModeEnabled(Context context) {
+        return getPrefs(context).getBoolean(KEY_AI_DEBUG_MODE, false);
+    }
+
+    public static void setAiDebugModeEnabled(Context context, boolean enabled) {
+        getPrefs(context).edit().putBoolean(KEY_AI_DEBUG_MODE, enabled).apply();
+    }
+
+    /**
+     * 锁屏时长（秒），默认60秒。
+     */
+    public static int getLockDurationSeconds(Context context) {
+        return getPrefs(context).getInt(KEY_LOCK_DURATION_SECONDS, 60);
+    }
+
+    public static void setLockDurationSeconds(Context context, int seconds) {
+        int clamped = Math.max(30, Math.min(300, seconds));
+        getPrefs(context).edit().putInt(KEY_LOCK_DURATION_SECONDS, clamped).apply();
     }
 
     private static SharedPreferences getPrefs(Context context) {

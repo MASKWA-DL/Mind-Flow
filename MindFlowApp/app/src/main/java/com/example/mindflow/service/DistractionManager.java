@@ -7,6 +7,8 @@ import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
@@ -16,6 +18,7 @@ import com.example.mindflow.R;
 import com.example.mindflow.database.MindFlowDatabase;
 import com.example.mindflow.database.dao.InterventionDao;
 import com.example.mindflow.model.Intervention;
+import com.example.mindflow.utils.FocusModePreferences;
 
 import org.json.JSONObject;
 
@@ -46,15 +49,15 @@ public class DistractionManager {
 
     // 连续工作可减少警告计数的时间（秒）
     private static final int WORK_RECOVERY_SECONDS = 30;
-    // 分心记录防抖时间（毫秒）- 两次分心记录之间至少间隔此时间
-    private static final long DISTRACTION_DEBOUNCE_MS = 15000; // 15秒，与AI监控频率同步
-    private static final int LOW_CONFIDENCE_THRESHOLD = 60;
-    private static final int MEDIUM_CONFIDENCE_THRESHOLD = 75;
-    private static final int HIGH_CONFIDENCE_THRESHOLD = 85;
-    private static final int DISTRACTION_TRIGGER_EVIDENCE = 70;
-    private static final int APP_SIGNAL_EVIDENCE = 20;
-    private static final int STRONG_FOCUS_RECOVERY = 35;
-    private static final int UNSURE_RECOVERY = 15;
+    // 这些阈值会被设置页灵敏度动态映射覆盖（宽松->严格）。
+    private static final long DEFAULT_DISTRACTION_DEBOUNCE_MS = 8000;
+    private static final int DEFAULT_LOW_CONFIDENCE_THRESHOLD = 50;
+    private static final int DEFAULT_MEDIUM_CONFIDENCE_THRESHOLD = 65;
+    private static final int DEFAULT_HIGH_CONFIDENCE_THRESHOLD = 80;
+    private static final int DEFAULT_DISTRACTION_TRIGGER_EVIDENCE = 55;
+    private static final int DEFAULT_APP_SIGNAL_EVIDENCE = 30;
+    private static final int DEFAULT_STRONG_FOCUS_RECOVERY = 25;
+    private static final int DEFAULT_UNSURE_RECOVERY = 10;
 
     private enum DecisionStatus {
         FOCUSED,
@@ -83,8 +86,8 @@ public class DistractionManager {
     private String lastAiActivity = ""; // AI 识别的用户行为
     private boolean lastAiFocused = true; // AI 判断是否专注
 
-    // 提醒冷却时间（毫秒）- 两次提醒之间至少间隔15秒，与AI监控频率同步
-    private static final long WARNING_COOLDOWN_MS = 15000; // 15秒
+    // 提醒冷却时间（毫秒）
+    private static final long DEFAULT_WARNING_COOLDOWN_MS = 5000;
     private long lastWarningTime = 0;
 
     // 分心历史记录（从SharedPreferences加载）
@@ -275,6 +278,18 @@ public class DistractionManager {
      */
     public boolean analyzeAndCheck(String aiVision, String foregroundApp, Set<String> interventionExemptApps) {
         long now = System.currentTimeMillis();
+        final int lowConfidenceThreshold = getLowConfidenceThreshold();
+        final int mediumConfidenceThreshold = getMediumConfidenceThreshold();
+        final int highConfidenceThreshold = getHighConfidenceThreshold();
+        final int distractionTriggerEvidence = getDistractionTriggerEvidence();
+        final int appSignalEvidence = getAppSignalEvidence();
+        final int strongFocusRecovery = getStrongFocusRecovery();
+        final int unsureRecovery = getUnsureRecovery();
+        final long warningCooldownMs = getWarningCooldownMs();
+        final long distractionDebounceMs = getDistractionDebounceMs();
+        final int sensitivity = getSensitivity();
+        final boolean ultraStrictMode = sensitivity >= 80;
+        final boolean extremeStrictMode = sensitivity >= 90;
 
         // 监控未启用时跳过（停止专注后）
         if (!isMonitoringEnabled) {
@@ -288,10 +303,9 @@ public class DistractionManager {
             return false;
         }
 
-        // 提醒冷却期内不进行监控（两次提醒间隔至少15秒，与AI监控频率同步）
-        if (now - lastWarningTime < WARNING_COOLDOWN_MS && lastWarningTime > 0) {
-            Log.d(TAG, "提醒冷却期内（" + (WARNING_COOLDOWN_MS - (now - lastWarningTime)) / 1000 + "秒后恢复），跳过监控");
-            return false;
+        // 提醒冷却期内仍继续监控，仅抑制重复提醒，避免“判定到分心却不计数”。
+        if (now - lastWarningTime < warningCooldownMs && lastWarningTime > 0) {
+            Log.d(TAG, "提醒冷却期内，继续监控并计数");
         }
 
         // 缓冲期内不进行监控（开始专注后/锁机结束后的6秒缓冲）
@@ -310,42 +324,47 @@ public class DistractionManager {
         if (assessment.status == DecisionStatus.FOCUSED) {
             lastAiFocused = true;
             consecutiveDistractedSignals = 0;
-            distractionEvidence = Math.max(0, distractionEvidence - STRONG_FOCUS_RECOVERY);
+            distractionEvidence = Math.max(0, distractionEvidence - strongFocusRecovery);
             logAiRecognition(aiVision, true);
             lastWorkTime = now;
             return false;
         }
 
-        if (assessment.status == DecisionStatus.UNSURE && !isDistractedByApp) {
+        if (assessment.status == DecisionStatus.UNSURE && !isDistractedByApp && !extremeStrictMode) {
             lastAiFocused = true;
             consecutiveDistractedSignals = 0;
-            distractionEvidence = Math.max(0, distractionEvidence - UNSURE_RECOVERY);
+            distractionEvidence = Math.max(0, distractionEvidence - unsureRecovery);
             logAiRecognition(aiVision + " [不确定]", true);
             lastWorkTime = now;
             return false;
         }
 
         if (assessment.status == DecisionStatus.DISTRACTED
-                && assessment.confidence < LOW_CONFIDENCE_THRESHOLD
-                && !isDistractedByApp) {
+                && assessment.confidence < lowConfidenceThreshold
+                && !isDistractedByApp
+                && !ultraStrictMode) {
             lastAiFocused = true;
             consecutiveDistractedSignals = 0;
-            distractionEvidence = Math.max(0, distractionEvidence - UNSURE_RECOVERY);
+            distractionEvidence = Math.max(0, distractionEvidence - unsureRecovery);
             logAiRecognition(aiVision + " [低置信忽略]", true);
             lastWorkTime = now;
             return false;
         }
 
         if (assessment.status == DecisionStatus.DISTRACTED && isInterventionExempt) {
-            lastAiFocused = false;
+            // 允许使用应用命中偏离目标时仅记录日志，不在UI上标记为“分心”以免误解为会计分。
+            lastAiFocused = true;
             consecutiveDistractedSignals = 0;
-            distractionEvidence = Math.max(0, distractionEvidence - UNSURE_RECOVERY);
+            distractionEvidence = Math.max(0, distractionEvidence - unsureRecovery);
             logAiRecognition(aiVision + " [允许使用应用，仅记录偏离目标不干预]", false);
             Log.i(TAG, "允许使用应用命中偏离目标，仅记录不干预: " + foregroundApp);
             return false;
         }
 
-        if (assessment.status == DecisionStatus.DISTRACTED) {
+        boolean nonFocusedSignal = assessment.status == DecisionStatus.DISTRACTED
+                || (extremeStrictMode && assessment.status == DecisionStatus.UNSURE);
+
+        if (nonFocusedSignal) {
             consecutiveDistractedSignals++;
         } else {
             consecutiveDistractedSignals = 0;
@@ -353,28 +372,33 @@ public class DistractionManager {
 
         int evidenceDelta = getEvidenceDelta(assessment.confidence, assessment.status);
         if (isDistractedByApp) {
-            evidenceDelta += APP_SIGNAL_EVIDENCE;
+            evidenceDelta += appSignalEvidence;
         }
         distractionEvidence = clamp(distractionEvidence + evidenceDelta, 0, 100);
         lastAiFocused = false;
 
+        boolean directDistractedHit = nonFocusedSignal
+            && (assessment.confidence >= mediumConfidenceThreshold
+            || (isDistractedByApp && assessment.confidence >= lowConfidenceThreshold)
+            || (ultraStrictMode && (isDistractedByApp || assessment.confidence >= 35))
+            || extremeStrictMode);
         boolean strongDistracted = assessment.status == DecisionStatus.DISTRACTED
-                && assessment.confidence >= HIGH_CONFIDENCE_THRESHOLD;
+                && assessment.confidence >= highConfidenceThreshold;
         boolean repeatedMediumDistracted = assessment.status == DecisionStatus.DISTRACTED
-                && assessment.confidence >= MEDIUM_CONFIDENCE_THRESHOLD
+                && assessment.confidence >= mediumConfidenceThreshold
                 && consecutiveDistractedSignals >= 2;
-        boolean evidenceEnough = distractionEvidence >= DISTRACTION_TRIGGER_EVIDENCE;
+        boolean evidenceEnough = distractionEvidence >= distractionTriggerEvidence;
 
         Log.d(TAG, "分心证据: status=" + assessment.status + ", confidence=" + assessment.confidence
                 + ", appSignal=" + isDistractedByApp + ", consecutive=" + consecutiveDistractedSignals
                 + ", evidence=" + distractionEvidence);
 
-        if (!strongDistracted && !repeatedMediumDistracted && !evidenceEnough) {
+        if (!directDistractedHit && !strongDistracted && !repeatedMediumDistracted && !evidenceEnough) {
             logAiRecognition(aiVision + " [证据累计中]", false);
             return false;
         }
 
-        if (now - lastDistractionTime <= DISTRACTION_DEBOUNCE_MS) {
+        if (now - lastDistractionTime < distractionDebounceMs) {
             Log.d(TAG, "分心事件防抖中，暂不重复记分");
             return false;
         }
@@ -415,8 +439,10 @@ public class DistractionManager {
                 assessment.reason = reason.isEmpty() ? "未提供理由" : reason;
                 assessment.confidence = confidence;
 
-                boolean reasonSaysDistracted = containsAnyIgnoreCase(reason, "不符合", "偏离目标", "无关", "娱乐", "购物");
-                boolean reasonSaysFocused = containsAnyIgnoreCase(reason, "符合目标", "相关", "正在进行", "学习", "工作");
+                boolean reasonSaysDistracted = containsAnyIgnoreCase(reason,
+                    "不符合", "偏离目标", "无关", "与目标无关", "娱乐", "购物", "刷视频", "闲聊");
+                boolean reasonSaysFocused = containsAnyIgnoreCase(reason,
+                    "符合目标", "与目标一致", "高度相关", "正在执行任务", "与当前任务匹配");
                 if ((assessment.status == DecisionStatus.FOCUSED && reasonSaysDistracted)
                         || (assessment.status == DecisionStatus.DISTRACTED && reasonSaysFocused)) {
                     Log.w(TAG, "AI JSON结论与原因矛盾，降级为不确定: " + jsonPayload);
@@ -551,19 +577,23 @@ public class DistractionManager {
 
     private void executeWarning() {
         long now = System.currentTimeMillis();
+        final long warningCooldownMs = getWarningCooldownMs();
 
         switch (currentLevel) {
             case WARNING:
                 // 分心1-2次：震动通知提醒（有冷却时间）
-                if (now - lastWarningTime >= WARNING_COOLDOWN_MS) {
+                if (now - lastWarningTime >= warningCooldownMs) {
                     lastWarningTime = now;
                     recordIntervention("warning");
+                    triggerHapticAlert(false);
                     showWarningNotification();
                 }
                 break;
             case LOCK:
                 // 分心3次：锁机
                 recordIntervention("lock");
+                triggerHapticAlert(true);
+                showWarningNotification();
                 showLockNotification();
                 break;
             default:
@@ -598,6 +628,23 @@ public class DistractionManager {
 
     private static final String CHANNEL_WARNING_ID = "MindFlow_Warning_Channel";
     private static final int NOTIFICATION_WARNING_ID = 2001;
+
+    private void triggerHapticAlert(boolean strong) {
+        try {
+            Vibrator vibrator = (Vibrator) context.getSystemService(Context.VIBRATOR_SERVICE);
+            if (vibrator == null || !vibrator.hasVibrator()) {
+                return;
+            }
+            long[] pattern = strong ? new long[]{0, 260, 120, 260} : new long[]{0, 160, 90, 160};
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator.vibrate(VibrationEffect.createWaveform(pattern, -1));
+            } else {
+                vibrator.vibrate(pattern, -1);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "触发震动提醒失败: " + e.getMessage());
+        }
+    }
 
     /**
      * 显示分心警告通知（Heads-up弹出）
@@ -846,21 +893,74 @@ public class DistractionManager {
 
     private int getEvidenceDelta(int confidence, DecisionStatus status) {
         if (status == DecisionStatus.UNSURE) {
-            return APP_SIGNAL_EVIDENCE / 2;
+            return getAppSignalEvidence() / 2;
         }
         if (status != DecisionStatus.DISTRACTED) {
-            return -UNSURE_RECOVERY;
+            return -getUnsureRecovery();
         }
-        if (confidence >= HIGH_CONFIDENCE_THRESHOLD) {
+        if (confidence >= getHighConfidenceThreshold()) {
             return 60;
         }
-        if (confidence >= MEDIUM_CONFIDENCE_THRESHOLD) {
+        if (confidence >= getMediumConfidenceThreshold()) {
             return 40;
         }
-        if (confidence >= LOW_CONFIDENCE_THRESHOLD) {
+        if (confidence >= getLowConfidenceThreshold()) {
             return 25;
         }
         return 10;
+    }
+
+    private int getSensitivity() {
+        return FocusModePreferences.getAiAuditSensitivity(context);
+    }
+
+    private double getSensitivityRatio() {
+        return Math.max(0d, Math.min(1d, getSensitivity() / 100d));
+    }
+
+    private int getLowConfidenceThreshold() {
+        double r = getSensitivityRatio();
+        return (int) Math.round(80 - 60 * r); // 宽松80 -> 严格20
+    }
+
+    private int getMediumConfidenceThreshold() {
+        double r = getSensitivityRatio();
+        return (int) Math.round(90 - 55 * r); // 宽松90 -> 严格35
+    }
+
+    private int getHighConfidenceThreshold() {
+        double r = getSensitivityRatio();
+        return (int) Math.round(96 - 41 * r); // 宽松96 -> 严格55
+    }
+
+    private int getDistractionTriggerEvidence() {
+        double r = getSensitivityRatio();
+        return (int) Math.round(95 - 75 * r); // 宽松95 -> 严格20
+    }
+
+    private int getAppSignalEvidence() {
+        double r = getSensitivityRatio();
+        return (int) Math.round(10 + 45 * r); // 宽松10 -> 严格55
+    }
+
+    private int getStrongFocusRecovery() {
+        double r = getSensitivityRatio();
+        return (int) Math.round(45 - 37 * r); // 宽松45 -> 严格8
+    }
+
+    private int getUnsureRecovery() {
+        double r = getSensitivityRatio();
+        return (int) Math.round(24 - 22 * r); // 宽松24 -> 严格2
+    }
+
+    private long getWarningCooldownMs() {
+        double r = getSensitivityRatio();
+        return (long) Math.round(12000 - 11200 * r); // 宽松12s -> 严格0.8s
+    }
+
+    private long getDistractionDebounceMs() {
+        double r = getSensitivityRatio();
+        return (long) Math.round(18000 - 17500 * r); // 宽松18s -> 严格0.5s
     }
 
     private DecisionStatus parseConclusion(String conclusion, String reason) {

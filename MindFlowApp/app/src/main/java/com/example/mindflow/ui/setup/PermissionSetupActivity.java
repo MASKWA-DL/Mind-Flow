@@ -22,9 +22,9 @@ import android.widget.Toast;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 
-import com.example.mindflow.MainActivity;
 import com.example.mindflow.R;
 import com.example.mindflow.service.AppMonitorService;
+import com.example.mindflow.ui.auth.LoginActivity;
 
 import java.util.List;
 
@@ -333,7 +333,7 @@ public class PermissionSetupActivity extends AppCompatActivity {
     }
 
     private void goToMain() {
-        Intent intent = new Intent(this, MainActivity.class);
+        Intent intent = new Intent(this, LoginActivity.class);
         startActivity(intent);
         finish();
     }

@@ -47,6 +47,7 @@ import com.example.mindflow.service.ScreenCaptureService;
 import com.example.mindflow.service.AppMonitorService;
 import com.example.mindflow.ui.setup.PermissionSetupActivity;
 import com.example.mindflow.utils.AppSettings;
+import com.example.mindflow.utils.FocusModePreferences;
 import com.example.mindflow.utils.ScreenCaptureManager;
 import com.google.android.material.bottomnavigation.BottomNavigationView;
 
@@ -457,7 +458,7 @@ public class MainActivity extends AppCompatActivity {
             label.interruptibilityScore = (float) resp.interruptibility_score;
             label.interruptibilityLabel = resp.interruptibility_score < 0.3 ? 1
                     : (resp.interruptibility_score > 0.7 ? 3 : 2);
-            label.focusLabel = 3;
+            label.focusLabel = mapFocusLabel(resp.pred_state_id);
 
             MindFlowDatabase.getInstance(this).labelWindowDao().insert(label);
         } catch (Exception e) {
@@ -479,11 +480,23 @@ public class MainActivity extends AppCompatActivity {
             return;
 
         if (!mWhitelistPackages.contains(currentPkg)) {
-            boolean isDoingWork = mAiCurrentVision.contains("工作") || mAiCurrentVision.contains("学习")
-                    || mAiCurrentVision.contains("代码");
-            if (!isDoingWork) {
-                double beta = (resp.interruptibility_score < 0.4) ? 3.0 : 1.0;
-                mDistractionTimeMs += (long) (10000 * beta);
+            String stateId = resp.pred_state_id == null ? "unknown" : resp.pred_state_id;
+            boolean isFocusState = "deep_focus".equals(stateId) || "light_focus".equals(stateId);
+            boolean visionLooksWork = mAiCurrentVision.contains("工作") || mAiCurrentVision.contains("学习")
+                    || mAiCurrentVision.contains("代码") || mAiCurrentVision.contains("文档");
+            boolean shouldAccumulateDistraction = !isFocusState || !visionLooksWork;
+
+            if (shouldAccumulateDistraction) {
+                double beta = (resp.interruptibility_score < 0.4) ? 2.2 : 1.2;
+                if (!isFocusState) {
+                    beta += 0.8;
+                }
+                if (!visionLooksWork) {
+                    beta += 0.6;
+                }
+                int sensitivity = FocusModePreferences.getAiAuditSensitivity(this); // 0=宽松,100=严格
+                double sensitivityFactor = 0.7 + (sensitivity / 100.0) * 0.8; // 0.7~1.5
+                mDistractionTimeMs += (long) (10000 * beta * sensitivityFactor);
                 mMaxDistractionQuotaMs = (long) ((2.0 * 60 * 1000) / (1.0 + mAlarmCountInSession * 0.4));
 
                 Log.w(TAG, LOG_SYSTEM + "分心计时: " + mDistractionTimeMs / 1000 + "s / " + mMaxDistractionQuotaMs / 1000
@@ -676,6 +689,24 @@ public class MainActivity extends AppCompatActivity {
                 return "rest_relax";
             default:
                 return "unknown";
+        }
+    }
+
+    private int mapFocusLabel(String stateId) {
+        if (stateId == null) {
+            return 2;
+        }
+        switch (stateId) {
+            case "deep_focus":
+                return 3;
+            case "light_focus":
+                return 2;
+            case "casual_scrolling":
+            case "high_stress":
+            case "rest_relax":
+                return 1;
+            default:
+                return 2;
         }
     }
 

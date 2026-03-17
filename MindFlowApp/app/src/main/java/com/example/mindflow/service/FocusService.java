@@ -929,6 +929,7 @@ public class FocusService extends Service {
             return;
         }
         Log.w(TAG, "触发应用锁定！");
+        long lockDurationMs = getConfiguredLockDurationMs();
 
         // 获取分心记录
         String distractionRecords = distractionManager.getLockScreenDistractionRecords();
@@ -937,12 +938,12 @@ public class FocusService extends Service {
         // 【关键】通知 AppMonitorService 激活锁机状态，并传递“允许使用应用”
         AppMonitorService monitorService = AppMonitorService.getInstance();
         if (monitorService != null) {
-            monitorService.enableLockMode(getInterventionExemptApps(), 60000L, reason, "",
+            monitorService.enableLockMode(getInterventionExemptApps(), lockDurationMs, reason, "",
                 distractionManager.getWarningCount(), distractionRecords);
         }
 
         // 启动锁机界面（优先悬浮窗，失败兜底 Activity）
-        launchLockUI(60000L, reason);
+        launchLockUI(lockDurationMs, reason);
 
         // 暂停计时器和屏幕分析
         if (timerTask != null) timerTask.cancel(false);
@@ -970,8 +971,9 @@ public class FocusService extends Service {
         boolean serviceLockActive = service != null && service.isLockScreenActive();
 
         if (serviceLockActive) {
+            long lockDurationMs = getConfiguredLockDurationMs();
             String reason = "检测到离开允许使用应用\n请返回专注";
-            launchLockUI(60000L, reason);
+            launchLockUI(lockDurationMs, reason);
             Log.w(TAG, "🔒 重新启动锁机");
         } else {
             Log.w(TAG, "⚠️ 锁机未激活，跳过");
@@ -1147,8 +1149,9 @@ public class FocusService extends Service {
 
                 // 只要锁机仍在进行中且未显示，就重新启动
                 if (!lockShowing && serviceLockActive) {
+                    long lockDurationMs = getConfiguredLockDurationMs();
                     String reason = "检测到离开允许使用应用\n请返回专注";
-                    launchLockScreenActivity(60000L, reason);
+                    launchLockScreenActivity(lockDurationMs, reason);
                     Log.w(TAG, "🔒 重新启动锁机");
                 }
             }
@@ -1163,6 +1166,7 @@ public class FocusService extends Service {
                 String reason = intent.getStringExtra("reason");
                 String advice = intent.getStringExtra("advice");
                 Log.d(TAG, "📩 收到触发锁机广播: " + reason);
+                long lockDurationMs = getConfiguredLockDurationMs();
 
                 // 直接触发锁机
                 String fullReason = (reason != null ? reason : "分心次数过多") +
@@ -1171,11 +1175,11 @@ public class FocusService extends Service {
                 // 【关键】激活锁机状态并传递“允许使用应用”
                 AppMonitorService monitorService = AppMonitorService.getInstance();
                 if (monitorService != null) {
-                    monitorService.enableLockMode(getInterventionExemptApps(), 60000L, fullReason, "", 0, "");
+                    monitorService.enableLockMode(getInterventionExemptApps(), lockDurationMs, fullReason, "", 0, "");
                 }
 
                 // 启动锁机界面（优先悬浮窗，失败兜底 Activity）
-                launchLockUI(60000L, fullReason);
+                launchLockUI(lockDurationMs, fullReason);
 
                 // 暂停计时器和屏幕分析
                 if (timerTask != null) timerTask.cancel(false);
@@ -1706,6 +1710,11 @@ public class FocusService extends Service {
         Set<String> allowed = new HashSet<>(systemExemptApps);
         allowed.addAll(userAllowedApps);
         return allowed;
+    }
+
+    private long getConfiguredLockDurationMs() {
+        int seconds = FocusModePreferences.getLockDurationSeconds(this);
+        return Math.max(30, seconds) * 1000L;
     }
 
     private synchronized boolean tryAcquireTextAnalysisSlot(String screenText, String packageName) {
