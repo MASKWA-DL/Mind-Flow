@@ -26,6 +26,7 @@ import okhttp3.Response;
 public class SupabaseClient {
     private static final String TAG = "SupabaseClient";
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
+    private static final String RECOVERY_REDIRECT_TO = "mindflow://auth-callback/reset-password";
     
     private final String supabaseUrl;
     private final String supabaseKey;
@@ -206,6 +207,7 @@ public class SupabaseClient {
 
         JSONObject body = new JSONObject();
         body.put("email", email);
+        body.put("redirect_to", RECOVERY_REDIRECT_TO);
         
         Request request = new Request.Builder()
                 .url(supabaseUrl + "/auth/v1/recover")

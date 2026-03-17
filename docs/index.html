@@ -168,6 +168,7 @@
 
     const SUPABASE_URL = resolveSupabaseUrl() || "https://hbycbtlboclqhkqznsea.supabase.co";
     const SUPABASE_ANON_KEY = window.MF_SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhieWNidGxib2NscWhrcXpuc2VhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM2NTMwNzQsImV4cCI6MjA4OTIyOTA3NH0.OBTy__XH3tlc9xgL5mzYRDdwjYkXqIl-WTzqaNnFEyA";
+    const RECOVERY_REDIRECT_TO = "mindflow://auth-callback/reset-password";
 
     function ensureConfig() {
       if (!SUPABASE_ANON_KEY) {
@@ -341,7 +342,7 @@
           "apikey": SUPABASE_ANON_KEY,
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ email })
+        body: JSON.stringify({ email, redirect_to: RECOVERY_REDIRECT_TO })
       });
 
       const text = await resp.text();
